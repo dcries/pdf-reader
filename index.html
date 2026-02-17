@@ -1,0 +1,1220 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="PDF Reader" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <title>PDF Book Reader with Translation</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.development.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  
+  <!-- Service Worker Registration for PWA -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', () => {
+        // Create inline service worker
+        const swCode = `
+          self.addEventListener('install', (event) => {
+            console.log('Service Worker installed');
+            self.skipWaiting();
+          });
+          
+          self.addEventListener('activate', (event) => {
+            console.log('Service Worker activated');
+            return self.clients.claim();
+          });
+          
+          self.addEventListener('fetch', (event) => {
+            // Let all requests pass through
+            event.respondWith(fetch(event.request));
+          });
+        `;
+        
+        const blob = new Blob([swCode], { type: 'application/javascript' });
+        const swUrl = URL.createObjectURL(blob);
+        
+        navigator.serviceWorker.register(swUrl)
+          .then(reg => console.log('Service Worker registered'))
+          .catch(err => console.log('Service Worker registration failed:', err));
+      });
+    }
+  </script>
+  
+  <style>
+    /* Prevent scrolling and bouncing on iOS */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      position: fixed;
+      width: 100%;
+      -webkit-overflow-scrolling: touch;
+    }
+    
+    #root {
+      height: 100%;
+      overflow: hidden;
+    }
+    
+    /* Prevent text selection on double-tap */
+    * {
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+    
+    /* Allow text selection only in the reading area */
+    .reading-text, .reading-text * {
+      -webkit-user-select: text;
+      user-select: text;
+    }
+    
+    /* Input styling */
+    input[type="number"], select {
+      -webkit-user-select: auto;
+      user-select: auto;
+    }
+
+    /* Dark mode transitions */
+    * {
+      transition: background-color 0.3s ease, color 0.3s ease, border-color 0.3s ease;
+    }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useRef, useEffect } = React;
+
+    // IndexedDB helper functions
+    const DB_NAME = 'PDFReaderDB';
+    const DB_VERSION = 1;
+    const STORE_NAME = 'pdfFiles';
+
+    const openDB = () => {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        
+        request.onerror = () => reject(request.error);
+        request.onsuccess = () => resolve(request.result);
+        
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains(STORE_NAME)) {
+            db.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          }
+        };
+      });
+    };
+
+    const savePDFToCache = async (bookId, fileName, fileData, fileSize) => {
+      try {
+        const db = await openDB();
+        const transaction = db.transaction([STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        
+        await store.put({
+          id: bookId,
+          fileName: fileName,
+          fileData: fileData,
+          fileSize: fileSize,
+          cachedAt: new Date().toISOString()
+        });
+        
+        return true;
+      } catch (error) {
+        console.error('Error saving PDF to cache:', error);
+        return false;
+      }
+    };
+
+    const getPDFFromCache = async (bookId) => {
+      try {
+        const db = await openDB();
+        const transaction = db.transaction([STORE_NAME], 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        
+        return new Promise((resolve, reject) => {
+          const request = store.get(bookId);
+          request.onsuccess = () => resolve(request.result);
+          request.onerror = () => reject(request.error);
+        });
+      } catch (error) {
+        console.error('Error getting PDF from cache:', error);
+        return null;
+      }
+    };
+
+    const deletePDFFromCache = async (bookId) => {
+      try {
+        const db = await openDB();
+        const transaction = db.transaction([STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(STORE_NAME);
+        await store.delete(bookId);
+        return true;
+      } catch (error) {
+        console.error('Error deleting PDF from cache:', error);
+        return false;
+      }
+    };
+
+    // Lucide React icons as inline SVG components
+    const ChevronLeft = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="15 18 9 12 15 6"></polyline>
+      </svg>
+    );
+
+    const ChevronRight = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="9 18 15 12 9 6"></polyline>
+      </svg>
+    );
+
+    const ChevronUp = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="18 15 12 9 6 15"></polyline>
+      </svg>
+    );
+
+    const ChevronDown = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="6 9 12 15 18 9"></polyline>
+      </svg>
+    );
+
+    const Upload = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+        <polyline points="17 8 12 3 7 8"></polyline>
+        <line x1="12" y1="3" x2="12" y2="15"></line>
+      </svg>
+    );
+
+    const X = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <line x1="18" y1="6" x2="6" y2="18"></line>
+        <line x1="6" y1="6" x2="18" y2="18"></line>
+      </svg>
+    );
+
+    const BookOpen = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
+        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
+      </svg>
+    );
+
+    const BookMarked = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"></path>
+        <polyline points="10 2 10 10 13 7 16 10 16 2"></polyline>
+      </svg>
+    );
+
+    const Trash2 = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <polyline points="3 6 5 6 21 6"></polyline>
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+        <line x1="10" y1="11" x2="10" y2="17"></line>
+        <line x1="14" y1="11" x2="14" y2="17"></line>
+      </svg>
+    );
+
+    const Moon = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+      </svg>
+    );
+
+    const Sun = ({ size = 24 }) => (
+      <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="5"></circle>
+        <line x1="12" y1="1" x2="12" y2="3"></line>
+        <line x1="12" y1="21" x2="12" y2="23"></line>
+        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
+        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
+        <line x1="1" y1="12" x2="3" y2="12"></line>
+        <line x1="21" y1="12" x2="23" y2="12"></line>
+        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
+        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
+      </svg>
+    );
+
+    function PDFBookReader() {
+      const [pdfFile, setPdfFile] = useState(null);
+      const [currentPage, setCurrentPage] = useState(1);
+      const [totalPages, setTotalPages] = useState(0);
+      const [pageText, setPageText] = useState('');
+      const [translation, setTranslation] = useState(null);
+      const [loading, setLoading] = useState(false);
+      const [pageHeight, setPageHeight] = useState(0);
+      const [jumpToPageInput, setJumpToPageInput] = useState('');
+      const [chapters, setChapters] = useState([]);
+      const [detectingChapters, setDetectingChapters] = useState(false);
+      const [selectedChapter, setSelectedChapter] = useState('');
+      const [currentBookId, setCurrentBookId] = useState(null);
+      const [savedBooks, setSavedBooks] = useState([]);
+      const [showContinuePrompt, setShowContinuePrompt] = useState(false);
+      const [savedPage, setSavedPage] = useState(null);
+      const [darkMode, setDarkMode] = useState(false);
+      const [headerCollapsed, setHeaderCollapsed] = useState(false);
+      const [fontSize, setFontSize] = useState('medium');
+      const fileInputRef = useRef(null);
+      const contentRef = useRef(null);
+      const touchStartX = useRef(0);
+      const touchEndX = useRef(0);
+
+      // Load saved books and dark mode preference on mount
+      useEffect(() => {
+        loadSavedBooks();
+        const savedDarkMode = localStorage.getItem('pdfReaderDarkMode');
+        if (savedDarkMode === 'true') {
+          setDarkMode(true);
+        }
+        const savedHeaderState = localStorage.getItem('pdfReaderHeaderCollapsed');
+        if (savedHeaderState === 'true') {
+          setHeaderCollapsed(true);
+        }
+        const savedFontSize = localStorage.getItem('pdfReaderFontSize');
+        if (savedFontSize) {
+          setFontSize(savedFontSize);
+        }
+      }, []);
+
+      // Save dark mode preference
+      useEffect(() => {
+        localStorage.setItem('pdfReaderDarkMode', darkMode.toString());
+      }, [darkMode]);
+
+      // Save header collapsed state
+      useEffect(() => {
+        localStorage.setItem('pdfReaderHeaderCollapsed', headerCollapsed.toString());
+      }, [headerCollapsed]);
+
+      // Save font size preference
+      useEffect(() => {
+        localStorage.setItem('pdfReaderFontSize', fontSize);
+      }, [fontSize]);
+
+      // Load saved books from localStorage
+      const loadSavedBooks = () => {
+        try {
+          const saved = localStorage.getItem('pdfReaderBooks');
+          if (saved) {
+            setSavedBooks(JSON.parse(saved));
+          }
+        } catch (error) {
+          console.error('Error loading saved books:', error);
+        }
+      };
+
+      // Generate a unique ID for a book based on its content
+      const generateBookId = (fileName, fileSize) => {
+        return `${fileName}_${fileSize}`;
+      };
+
+      // Save reading progress
+      const saveProgress = (bookId, page, fileName, fileSize, totalPages) => {
+        try {
+          const saved = localStorage.getItem('pdfReaderBooks');
+          const books = saved ? JSON.parse(saved) : {};
+          
+          books[bookId] = {
+            fileName,
+            fileSize,
+            currentPage: page,
+            totalPages,
+            lastRead: new Date().toISOString()
+          };
+          
+          localStorage.setItem('pdfReaderBooks', JSON.stringify(books));
+          setSavedBooks(books);
+        } catch (error) {
+          console.error('Error saving progress:', error);
+        }
+      };
+
+      // Get saved progress for a book
+      const getSavedProgress = (bookId) => {
+        try {
+          const saved = localStorage.getItem('pdfReaderBooks');
+          if (saved) {
+            const books = JSON.parse(saved);
+            return books[bookId];
+          }
+        } catch (error) {
+          console.error('Error getting saved progress:', error);
+        }
+        return null;
+      };
+
+      // Delete a saved book
+      const deleteBook = async (bookId, event) => {
+        event.stopPropagation();
+        
+        if (confirm('Delete this book from your library? This will remove the cached file and reading progress.')) {
+          await deletePDFFromCache(bookId);
+          
+          try {
+            const saved = localStorage.getItem('pdfReaderBooks');
+            if (saved) {
+              const books = JSON.parse(saved);
+              delete books[bookId];
+              localStorage.setItem('pdfReaderBooks', JSON.stringify(books));
+              setSavedBooks(books);
+            }
+          } catch (error) {
+            console.error('Error deleting book:', error);
+          }
+        }
+      };
+
+      // Load a saved book from cache
+      const loadSavedBook = async (bookId) => {
+        setLoading(true);
+        try {
+          const cachedBook = await getPDFFromCache(bookId);
+          if (cachedBook) {
+            await loadPDFFromData(cachedBook.fileData, bookId, cachedBook.fileName);
+          } else {
+            alert('Book not found in cache. Please re-upload the file.');
+          }
+        } catch (error) {
+          console.error('Error loading saved book:', error);
+          alert('Error loading book. Please try re-uploading.');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Auto-save progress when page changes
+      useEffect(() => {
+        if (currentBookId && pdfFile && currentPage > 0) {
+          const timeoutId = setTimeout(() => {
+            const fileName = currentBookId.split('_')[0];
+            const fileSize = parseInt(currentBookId.split('_')[1]);
+            saveProgress(currentBookId, currentPage, fileName, fileSize, totalPages);
+          }, 1000);
+
+          return () => clearTimeout(timeoutId);
+        }
+      }, [currentPage, currentBookId, pdfFile, totalPages]);
+
+      // Calculate available height for content
+      useEffect(() => {
+        const calculateHeight = () => {
+          const vh = window.innerHeight;
+          // Adjust based on header state
+          // Collapsed: only toggle button (40px) + bottom nav (60px) + bottom button (40px) = 140px
+          // Expanded: toggle + top nav (72px) + jump nav (80px) + bottom nav + bottom button = 292px
+          const reservedHeight = headerCollapsed ? 140 : 292;
+          setPageHeight(vh - reservedHeight);
+        };
+
+        calculateHeight();
+        window.addEventListener('resize', calculateHeight);
+        window.addEventListener('orientationchange', calculateHeight);
+        
+        return () => {
+          window.removeEventListener('resize', calculateHeight);
+          window.removeEventListener('orientationchange', calculateHeight);
+        };
+      }, [headerCollapsed]);
+
+      // Swipe gesture handling
+      useEffect(() => {
+        const handleTouchStart = (e) => {
+          touchStartX.current = e.changedTouches[0].screenX;
+        };
+
+        const handleTouchEnd = (e) => {
+          touchEndX.current = e.changedTouches[0].screenX;
+          handleSwipe();
+        };
+
+        const handleSwipe = () => {
+          const swipeDistance = touchStartX.current - touchEndX.current;
+          const minSwipeDistance = 50;
+
+          if (Math.abs(swipeDistance) > minSwipeDistance) {
+            if (swipeDistance > 0) {
+              if (currentPage < totalPages && pdfFile) {
+                goToPage(currentPage + 1);
+              }
+            } else {
+              if (currentPage > 1 && pdfFile) {
+                goToPage(currentPage - 1);
+              }
+            }
+          }
+        };
+
+        const content = contentRef.current;
+        if (content) {
+          content.addEventListener('touchstart', handleTouchStart);
+          content.addEventListener('touchend', handleTouchEnd);
+          
+          return () => {
+            content.removeEventListener('touchstart', handleTouchStart);
+            content.removeEventListener('touchend', handleTouchEnd);
+          };
+        }
+      }, [currentPage, totalPages, pdfFile]);
+
+      // Detect chapters
+      const detectChapters = async (pdf) => {
+        setDetectingChapters(true);
+        const detectedChapters = [];
+        
+        try {
+          for (let i = 1; i <= pdf.numPages; i++) {
+            const textItems = await extractTextFromPage(pdf, i);
+            const fullText = textItems.map(item => item.text).join(' ');
+            
+            const chapterPatterns = [
+              /chapter\s+(\d+|[IVXLCDM]+)/i,
+              /capítulo\s+(\d+|[IVXLCDM]+)/i,
+              /^(\d+)\.\s+[A-Z]/,
+              /^part\s+(\d+|[IVXLCDM]+)/i,
+              /^parte\s+(\d+|[IVXLCDM]+)/i,
+            ];
+            
+            for (const pattern of chapterPatterns) {
+              const match = fullText.match(pattern);
+              if (match) {
+                const titleMatch = fullText.match(pattern.source + '[:\\s]*([^\n.]{3,50})');
+                const title = titleMatch ? titleMatch[1].trim() : match[0];
+                
+                detectedChapters.push({
+                  page: i,
+                  title: title || `Chapter at page ${i}`,
+                  fullMatch: match[0]
+                });
+                break;
+              }
+            }
+          }
+          
+          setChapters(detectedChapters);
+        } catch (error) {
+          console.error('Error detecting chapters:', error);
+        } finally {
+          setDetectingChapters(false);
+        }
+      };
+
+      // Extract text from PDF page
+      const extractTextFromPage = async (pdf, pageNum) => {
+        try {
+          const page = await pdf.getPage(pageNum);
+          const textContent = await page.getTextContent();
+          
+          const textItems = textContent.items.map(item => ({
+            text: item.str,
+            x: item.transform[4],
+            y: item.transform[5],
+            width: item.width,
+            height: item.height
+          }));
+          
+          return textItems;
+        } catch (error) {
+          console.error('Error extracting text:', error);
+          return [];
+        }
+      };
+
+      // Load PDF from file data
+      const loadPDFFromData = async (fileData, bookId, fileName) => {
+        setCurrentBookId(bookId);
+        
+        const savedProgress = getSavedProgress(bookId);
+        
+        setLoading(true);
+        try {
+          const pdfjsLib = window['pdfjs-dist/build/pdf'];
+          pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+          
+          const pdf = await pdfjsLib.getDocument(fileData).promise;
+          setPdfFile(pdf);
+          setTotalPages(pdf.numPages);
+          
+          if (savedProgress && savedProgress.currentPage > 1) {
+            setShowContinuePrompt(true);
+            setSavedPage(savedProgress.currentPage);
+            setCurrentPage(1);
+            await loadPage(pdf, 1);
+          } else {
+            setCurrentPage(1);
+            await loadPage(pdf, 1);
+          }
+          
+          detectChapters(pdf);
+        } catch (error) {
+          console.error('Error loading PDF:', error);
+          alert('Error loading PDF file');
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Load PDF when file is selected
+      const handleFileUpload = async (event) => {
+        const file = event.target.files[0];
+        
+        if (!file) {
+          console.error('No file selected');
+          return;
+        }
+        
+        console.log('File selected:', file.name, 'Type:', file.type, 'Size:', file.size);
+        
+        // iOS sometimes doesn't set the MIME type correctly
+        if (file.type !== 'application/pdf' && !file.name.toLowerCase().endsWith('.pdf')) {
+          alert('Please upload a PDF file');
+          return;
+        }
+
+        // Check file size (100MB limit)
+        if (file.size > 100 * 1024 * 1024) {
+          alert('PDF file is too large. Please use a file under 100MB.');
+          return;
+        }
+
+        const bookId = generateBookId(file.name, file.size);
+        
+        setLoading(true);
+        try {
+          const fileReader = new FileReader();
+          
+          fileReader.onerror = (error) => {
+            console.error('FileReader error:', error);
+            alert('Error reading file. Please try again.');
+            setLoading(false);
+          };
+          
+          fileReader.onload = async (e) => {
+            try {
+              if (!e.target.result) {
+                throw new Error('Failed to read file data');
+              }
+              
+              const typedArray = new Uint8Array(e.target.result);
+              console.log('File read successfully, size:', typedArray.length);
+              
+              // Save to cache
+              await savePDFToCache(bookId, file.name, typedArray, file.size);
+              
+              // Load the PDF
+              await loadPDFFromData(typedArray, bookId, file.name);
+            } catch (err) {
+              console.error('Error processing PDF:', err);
+              alert('Error loading PDF: ' + err.message);
+              setLoading(false);
+            }
+          };
+          
+          fileReader.readAsArrayBuffer(file);
+        } catch (error) {
+          console.error('Error in handleFileUpload:', error);
+          alert('Error loading PDF file: ' + error.message);
+          setLoading(false);
+        }
+      };
+
+      // Handle continue reading
+      const handleContinueReading = () => {
+        if (savedPage && pdfFile) {
+          goToPage(savedPage);
+        }
+        setShowContinuePrompt(false);
+      };
+
+      // Handle start from beginning
+      const handleStartFromBeginning = () => {
+        setShowContinuePrompt(false);
+      };
+
+      // Load a specific page
+      const loadPage = async (pdf, pageNum) => {
+        setLoading(true);
+        setTranslation(null);
+        try {
+          const textItems = await extractTextFromPage(pdf, pageNum);
+          setPageText(textItems);
+        } catch (error) {
+          console.error('Error loading page:', error);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      // Navigate pages
+      const goToPage = (pageNum) => {
+        if (pageNum >= 1 && pageNum <= totalPages && pdfFile) {
+          setCurrentPage(pageNum);
+          loadPage(pdfFile, pageNum);
+          setJumpToPageInput('');
+          setSelectedChapter('');
+        }
+      };
+
+      // Handle jump to page
+      const handleJumpToPage = () => {
+        const pageNum = parseInt(jumpToPageInput);
+        if (!isNaN(pageNum) && pageNum >= 1 && pageNum <= totalPages) {
+          goToPage(pageNum);
+        } else {
+          alert(`Please enter a page number between 1 and ${totalPages}`);
+        }
+      };
+
+      // Handle jump to chapter
+      const handleJumpToChapter = (e) => {
+        const pageNum = parseInt(e.target.value);
+        if (!isNaN(pageNum)) {
+          setSelectedChapter(e.target.value);
+          goToPage(pageNum);
+        }
+      };
+
+      // Handle Enter key
+      const handleJumpKeyPress = (e) => {
+        if (e.key === 'Enter') {
+          handleJumpToPage();
+        }
+      };
+
+      // Embedded offline Spanish-English dictionary (327 most common words)
+      const offlineDictionary = {"el":"the","la":"the","de":"of/from","que":"that/which","y":"and","a":"to","en":"in","un":"a/an","ser":"to be","se":"oneself","no":"no/not","haber":"to have","por":"by/for","con":"with","su":"his/her/their","para":"for","como":"as/like","estar":"to be","tener":"to have","le":"him/her","lo":"it/him","todo":"all/everything","pero":"but","más":"more","hacer":"to do/make","o":"or","poder":"to be able/can","decir":"to say/tell","este":"this","ir":"to go","otro":"other/another","ese":"that","si":"if","me":"me","ya":"already","ver":"to see","porque":"because","dar":"to give","cuando":"when","él":"he","muy":"very","sin":"without","vez":"time","mucho":"much/a lot","saber":"to know","qué":"what","sobre":"about/on","mi":"my","alguno":"some","mismo":"same","yo":"I","también":"also/too","hasta":"until/even","año":"year","dos":"two","querer":"to want","entre":"between","así":"thus/so","primero":"first","desde":"from/since","grande":"big/large","eso":"that","ni":"neither/nor","nos":"us","llegar":"to arrive","pasar":"to pass/happen","tiempo":"time","ella":"she","sí":"yes","día":"day","uno":"one","bien":"well/good","poco":"little/few","deber":"must/should","entonces":"then","poner":"to put","cosa":"thing","tanto":"so much","hombre":"man","parecer":"to seem","nuestro":"our","tan":"so","donde":"where","ahora":"now","parte":"part","después":"after","vida":"life","quedar":"to stay/remain","siempre":"always","creer":"to believe","hablar":"to speak","llevar":"to carry/wear","dejar":"to leave/let","nada":"nothing","cada":"each","seguir":"to follow","menos":"less","nuevo":"new","encontrar":"to find","algo":"something","solo":"only/alone","casa":"house","mundo":"world","país":"country","contra":"against","trabajo":"work","llamar":"to call","agua":"water","mano":"hand","madre":"mother","padre":"father","nombre":"name","libro":"book","ciudad":"city","hora":"hour","calle":"street","mujer":"woman","niño":"child/boy","ojo":"eye","cara":"face","sol":"sun","luna":"moon","mesa":"table","silla":"chair","puerta":"door","ventana":"window","cama":"bed","comida":"food","perro":"dog","gato":"cat","árbol":"tree","flor":"flower","color":"color","blanco":"white","negro":"black","rojo":"red","azul":"blue","verde":"green","amarillo":"yellow","amor":"love","amigo":"friend","familia":"family","hermano":"brother","hermana":"sister","hijo":"son","hija":"daughter","esposo":"husband","esposa":"wife","comer":"to eat","beber":"to drink","dormir":"to sleep","caminar":"to walk","correr":"to run","leer":"to read","escribir":"to write","pensar":"to think","sentir":"to feel","vivir":"to live","morir":"to die","nacer":"to be born","aprender":"to learn","enseñar":"to teach","estudiar":"to study","trabajar":"to work","jugar":"to play","cantar":"to sing","bailar":"to dance","reír":"to laugh","llorar":"to cry","ayudar":"to help","necesitar":"to need","usar":"to use","comprar":"to buy","vender":"to sell","pagar":"to pay","ganar":"to win/earn","perder":"to lose","buscar":"to search/look for","esperar":"to wait/hope","olvidar":"to forget","recordar":"to remember","preguntar":"to ask","responder":"to answer","entender":"to understand","explicar":"to explain","conocer":"to know/meet","mostrar":"to show","abrir":"to open","cerrar":"to close","comenzar":"to begin","terminar":"to finish","continuar":"to continue","cambiar":"to change","recibir":"to receive","enviar":"to send","guardar":"to save/keep","tirar":"to throw","caer":"to fall","subir":"to go up","bajar":"to go down","entrar":"to enter","salir":"to leave/go out","venir":"to come","volver":"to return","traer":"to bring","tomar":"to take","coger":"to catch/take","tocar":"to touch/play","mirar":"to look at","escuchar":"to listen","oír":"to hear","sentarse":"to sit down","levantarse":"to get up","despertarse":"to wake up","acostarse":"to go to bed","vestirse":"to get dressed","lavarse":"to wash oneself","limpio":"clean","sucio":"dirty","pequeño":"small","alto":"tall/high","bajo":"short/low","largo":"long","corto":"short","ancho":"wide","estrecho":"narrow","gordo":"fat","delgado":"thin","fuerte":"strong","débil":"weak","joven":"young","viejo":"old","antiguo":"old/ancient","bueno":"good","malo":"bad","mejor":"better","peor":"worse","fácil":"easy","difícil":"difficult","posible":"possible","imposible":"impossible","importante":"important","necesario":"necessary","seguro":"sure/safe","peligroso":"dangerous","feliz":"happy","triste":"sad","contento":"content/happy","enojado":"angry","cansado":"tired","enfermo":"sick","sano":"healthy","rico":"rich","pobre":"poor","caro":"expensive","barato":"cheap","caliente":"hot","frío":"cold","templado":"warm","húmedo":"humid/wet","seco":"dry","lleno":"full","vacío":"empty","claro":"clear/light","oscuro":"dark","rápido":"fast","lento":"slow","temprano":"early","tarde":"late","cerca":"near","lejos":"far","dentro":"inside","fuera":"outside","arriba":"up/above","abajo":"down/below","delante":"in front","detrás":"behind","izquierda":"left","derecha":"right","aquí":"here","allí":"there","acá":"here","allá":"there","hoy":"today","ayer":"yesterday","mañana":"tomorrow","semana":"week","mes":"month","lunes":"Monday","martes":"Tuesday","miércoles":"Wednesday","jueves":"Thursday","viernes":"Friday","sábado":"Saturday","domingo":"Sunday","enero":"January","febrero":"February","marzo":"March","abril":"April","mayo":"May","junio":"June","julio":"July","agosto":"August","septiembre":"September","octubre":"October","noviembre":"November","diciembre":"December","número":"number","tres":"three","cuatro":"four","cinco":"five","seis":"six","siete":"seven","ocho":"eight","nueve":"nine","diez":"ten","once":"eleven","doce":"twelve","trece":"thirteen","catorce":"fourteen","quince":"fifteen","veinte":"twenty","treinta":"thirty","cuarenta":"forty","cincuenta":"fifty","cien":"hundred","mil":"thousand"};
+
+      // Translate word - tries online first, falls back to offline dictionary
+      const handleWordClick = async (word, event) => {
+        event.stopPropagation();
+        
+        const cleanWord = word.replace(/[.,;:!?¿¡"'()]/g, '').trim().toLowerCase();
+        if (!cleanWord) return;
+
+        const rect = event.target.getBoundingClientRect();
+        
+        setTranslation({
+          word: cleanWord,
+          translation: 'Translating...',
+          x: rect.left,
+          y: rect.top,
+          width: rect.width,
+          height: rect.height
+        });
+
+        try {
+          // Try Google Translate API first (online)
+          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=es&tl=en&dt=t&q=${encodeURIComponent(cleanWord)}`;
+          
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
+          
+          const response = await fetch(url, { 
+            signal: controller.signal,
+            cache: 'no-cache'
+          });
+          clearTimeout(timeoutId);
+          
+          const data = await response.json();
+          const translatedText = data[0][0][0];
+
+          setTranslation(prev => ({
+            ...prev,
+            translation: translatedText
+          }));
+        } catch (error) {
+          // Offline or network error - use embedded dictionary
+          console.log('Using offline dictionary');
+          
+          const offlineTranslation = offlineDictionary[cleanWord];
+          
+          if (offlineTranslation) {
+            setTranslation(prev => ({
+              ...prev,
+              translation: offlineTranslation + ' (offline)'
+            }));
+          } else {
+            // Word not in dictionary - suggest iOS Look Up
+            setTranslation(prev => ({
+              ...prev,
+              translation: 'Tap and hold the word, then select "Look Up" for more translations'
+            }));
+          }
+        }
+      };
+
+      // Close translation popup
+      const closeTranslation = () => {
+        setTranslation(null);
+      };
+
+      // Handle click on reading area (close translation)
+      const handleReadingAreaClick = (e) => {
+        // Close translation when clicking anywhere in the reading area
+        if (translation) {
+          closeTranslation();
+        }
+      };
+
+      // Format file size
+      const formatFileSize = (bytes) => {
+        if (bytes < 1024) return bytes + ' B';
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+        return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+      };
+
+      // Toggle dark mode
+      const toggleDarkMode = () => {
+        setDarkMode(!darkMode);
+      };
+
+      // Toggle header collapsed state
+      const toggleHeader = () => {
+        setHeaderCollapsed(!headerCollapsed);
+      };
+
+      return (
+        <div className={`h-full flex flex-col overflow-hidden ${darkMode ? 'bg-gray-900' : 'bg-gradient-to-br from-slate-50 to-slate-100'}`}>
+          <div className="flex-1 flex flex-col overflow-hidden max-w-4xl mx-auto w-full">
+            <div className={`flex-1 flex flex-col shadow-lg overflow-hidden ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+              {/* Header */}
+              {!headerCollapsed && (
+                <div className={`p-4 flex-shrink-0 ${darkMode ? 'bg-gray-900' : 'bg-gradient-to-r from-blue-600 to-blue-700'}`}>
+                  <div className="flex items-center justify-between">
+                    <div className="flex-1">
+                      <h1 className={`text-2xl font-bold mb-1 ${darkMode ? 'text-gray-100' : 'text-white'}`}>PDF Book Reader</h1>
+                      <p className={`text-sm ${darkMode ? 'text-gray-400' : 'text-blue-100'}`}>
+                        Upload a Spanish PDF and click any word to translate • Swipe to navigate
+                      </p>
+                    </div>
+                    <button
+                      onClick={toggleDarkMode}
+                      className={`p-3 rounded-lg transition-colors ${
+                        darkMode 
+                          ? 'bg-gray-700 hover:bg-gray-600 active:bg-gray-500 text-yellow-400' 
+                          : 'bg-blue-800 hover:bg-blue-900 active:bg-blue-950 text-white'
+                      }`}
+                      title={darkMode ? "Switch to light mode" : "Switch to dark mode"}
+                    >
+                      {darkMode ? <Sun size={24} /> : <Moon size={24} />}
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Upload Section */}
+              {!pdfFile && (
+                <div className="flex-1 flex items-center justify-center p-8 overflow-y-auto">
+                  <div className="text-center w-full max-w-2xl">
+                    <input
+                      type="file"
+                      ref={fileInputRef}
+                      onChange={handleFileUpload}
+                      accept="application/pdf,.pdf"
+                      className="hidden"
+                    />
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      className={`inline-flex items-center gap-2 px-8 py-4 rounded-lg font-medium transition-colors shadow-lg ${
+                        darkMode
+                          ? 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white'
+                          : 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white'
+                      }`}
+                    >
+                      <Upload size={24} />
+                      Upload PDF Book
+                    </button>
+                    <p className={`mt-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Select a PDF file to begin reading</p>
+                    
+                    {/* Show saved books */}
+                    {Object.keys(savedBooks).length > 0 && (
+                      <div className="mt-8 text-left">
+                        <h3 className={`text-sm font-semibold mb-3 flex items-center gap-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                          <BookMarked size={16} />
+                          Your Library
+                        </h3>
+                        <div className="space-y-2">
+                          {Object.entries(savedBooks)
+                            .sort(([, a], [, b]) => new Date(b.lastRead) - new Date(a.lastRead))
+                            .map(([id, book]) => (
+                              <div 
+                                key={id} 
+                                className={`flex items-center justify-between p-3 rounded-lg cursor-pointer transition-colors group ${
+                                  darkMode 
+                                    ? 'bg-gray-700 hover:bg-gray-600 active:bg-gray-500' 
+                                    : 'bg-gray-50 hover:bg-gray-100 active:bg-gray-200'
+                                }`}
+                                onClick={() => loadSavedBook(id)}
+                              >
+                                <div className="flex-1 min-w-0">
+                                  <div className={`font-medium truncate ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{book.fileName}</div>
+                                  <div className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>
+                                    Page {book.currentPage} of {book.totalPages} • {formatFileSize(book.fileSize)}
+                                  </div>
+                                </div>
+                                <button
+                                  onClick={(e) => deleteBook(id, e)}
+                                  className={`ml-3 p-2 opacity-0 group-hover:opacity-100 transition-opacity ${
+                                    darkMode 
+                                      ? 'text-gray-400 hover:text-red-400 active:text-red-300' 
+                                      : 'text-gray-400 hover:text-red-600 active:text-red-700'
+                                  }`}
+                                  title="Delete book"
+                                >
+                                  <Trash2 size={18} />
+                                </button>
+                              </div>
+                            ))}
+                        </div>
+                        <p className={`mt-3 text-xs text-center ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                          Click a book to open it instantly (no re-upload needed!)
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Continue Reading Prompt */}
+              {showContinuePrompt && (
+                <div className="absolute inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                  <div className={`rounded-lg p-6 max-w-sm mx-4 shadow-2xl ${darkMode ? 'bg-gray-800' : 'bg-white'}`}>
+                    <div className="flex items-center gap-2 mb-4">
+                      <BookMarked size={24} className={darkMode ? 'text-blue-400' : 'text-blue-600'} />
+                      <h2 className={`text-xl font-bold ${darkMode ? 'text-gray-100' : 'text-gray-900'}`}>Welcome Back!</h2>
+                    </div>
+                    <p className={`mb-6 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                      You were last reading on page {savedPage}. Would you like to continue from where you left off?
+                    </p>
+                    <div className="flex gap-3">
+                      <button
+                        onClick={handleStartFromBeginning}
+                        className={`flex-1 px-4 py-2 rounded-lg transition-colors ${
+                          darkMode
+                            ? 'border border-gray-600 text-gray-300 hover:bg-gray-700 active:bg-gray-600'
+                            : 'border border-gray-300 text-gray-700 hover:bg-gray-50 active:bg-gray-100'
+                        }`}
+                      >
+                        Start from Beginning
+                      </button>
+                      <button
+                        onClick={handleContinueReading}
+                        className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 active:bg-blue-800"
+                      >
+                        Continue Reading
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Book Reader */}
+              {pdfFile && (
+                <div className="flex-1 flex flex-col overflow-hidden">
+                  {/* Top Navigation - Collapsible */}
+                  {!headerCollapsed && (
+                    <div className={`flex items-center justify-between px-4 py-3 border-b flex-shrink-0 ${
+                      darkMode ? 'border-gray-700' : 'border-gray-200'
+                    }`}>
+                      <button
+                        onClick={() => goToPage(currentPage - 1)}
+                        disabled={currentPage === 1}
+                        className={`flex items-center gap-1 px-4 py-2 rounded-lg transition-colors text-sm ${
+                          darkMode
+                            ? 'bg-gray-700 active:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600'
+                            : 'bg-gray-100 active:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-400'
+                        }`}
+                      >
+                        <ChevronLeft size={18} />
+                        Prev
+                      </button>
+                      
+                      <div className="text-center">
+                        <div className={`text-xs ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Page</div>
+                        <div className={`text-lg font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-900'}`}>
+                          {currentPage} / {totalPages}
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => goToPage(currentPage + 1)}
+                        disabled={currentPage === totalPages}
+                        className={`flex items-center gap-1 px-4 py-2 rounded-lg transition-colors text-sm ${
+                          darkMode
+                            ? 'bg-gray-700 active:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600'
+                            : 'bg-gray-100 active:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-400'
+                        }`}
+                      >
+                        Next
+                        <ChevronRight size={18} />
+                      </button>
+                    </div>
+                  )}
+
+                  {/* Jump Navigation - Collapsible */}
+                  {!headerCollapsed && (
+                    <div className={`flex flex-col gap-2 px-4 py-2 border-b flex-shrink-0 ${
+                      darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'
+                    }`}>
+                      {/* Font Size Selector */}
+                      <div className="flex items-center justify-center gap-2">
+                        <label className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Font size:</label>
+                        <select
+                          value={fontSize}
+                          onChange={(e) => setFontSize(e.target.value)}
+                          className={`px-2 py-1 border rounded text-sm ${
+                            darkMode
+                              ? 'bg-gray-700 border-gray-600 text-gray-200'
+                              : 'bg-white border-gray-300 text-gray-900'
+                          }`}
+                        >
+                          <option value="small">Small</option>
+                          <option value="medium">Medium</option>
+                          <option value="large">Large</option>
+                          <option value="xlarge">Extra Large</option>
+                        </select>
+                      </div>
+                      
+                      {/* Jump to Page */}
+                      <div className="flex items-center justify-center gap-2">
+                        <label className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Jump to page:</label>
+                        <input
+                          type="number"
+                          min="1"
+                          max={totalPages}
+                          value={jumpToPageInput}
+                          onChange={(e) => setJumpToPageInput(e.target.value)}
+                          onKeyPress={handleJumpKeyPress}
+                          placeholder={`1-${totalPages}`}
+                          className={`w-20 px-2 py-1 border rounded text-sm text-center ${
+                            darkMode
+                              ? 'bg-gray-700 border-gray-600 text-gray-200 placeholder-gray-500'
+                              : 'bg-white border-gray-300 text-gray-900'
+                          }`}
+                        />
+                        <button
+                          onClick={handleJumpToPage}
+                          className="px-3 py-1 bg-blue-600 active:bg-blue-700 text-white rounded text-sm"
+                        >
+                          Go
+                        </button>
+                      </div>
+
+                      {chapters.length > 0 && (
+                        <div className="flex items-center justify-center gap-2">
+                          <BookOpen size={16} className={darkMode ? 'text-gray-400' : 'text-gray-600'} />
+                          <label className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Jump to chapter:</label>
+                          <select
+                            value={selectedChapter}
+                            onChange={handleJumpToChapter}
+                            className={`px-2 py-1 border rounded text-sm max-w-[200px] ${
+                              darkMode
+                                ? 'bg-gray-700 border-gray-600 text-gray-200'
+                                : 'bg-white border-gray-300 text-gray-900'
+                            }`}
+                          >
+                            <option value="">Select chapter...</option>
+                            {chapters.map((chapter, idx) => (
+                              <option key={idx} value={chapter.page}>
+                                {chapter.title} (p.{chapter.page})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {detectingChapters && (
+                        <div className={`text-xs text-center ${darkMode ? 'text-gray-500' : 'text-gray-500'}`}>
+                          Detecting chapters...
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* Collapse/Expand Toggle */}
+                  <div className={`flex justify-center py-1 border-b flex-shrink-0 ${
+                    darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'
+                  }`}>
+                    <button
+                      onClick={toggleHeader}
+                      className={`px-3 py-1 rounded transition-colors ${
+                        darkMode
+                          ? 'text-gray-400 hover:text-gray-300 active:text-gray-200'
+                          : 'text-gray-600 hover:text-gray-700 active:text-gray-800'
+                      }`}
+                      title={headerCollapsed ? "Show header" : "Hide header"}
+                    >
+                      {headerCollapsed ? <ChevronDown size={20} /> : <ChevronUp size={20} />}
+                    </button>
+                  </div>
+
+                  {/* Page Content */}
+                  <div 
+                    ref={contentRef}
+                    className={`flex-1 overflow-hidden touch-pan-y ${
+                      darkMode ? 'bg-gray-900' : 'bg-amber-50'
+                    }`}
+                    style={{ height: pageHeight > 0 ? `${pageHeight}px` : 'auto' }}
+                    onClick={handleReadingAreaClick}
+                  >
+                    <div className="h-full overflow-y-auto p-6">
+                      {loading ? (
+                        <div className="flex items-center justify-center h-full">
+                          <div className={`animate-spin rounded-full h-12 w-12 border-b-2 ${
+                            darkMode ? 'border-blue-400' : 'border-blue-600'
+                          }`}></div>
+                        </div>
+                      ) : (
+                        <div className={`text-base sm:text-lg leading-relaxed space-y-2 font-serif reading-text ${
+                          darkMode ? 'text-gray-200' : 'text-gray-900'
+                        }`} style={{
+                          fontSize: fontSize === 'small' ? '0.875rem' : 
+                                   fontSize === 'medium' ? '1rem' : 
+                                   fontSize === 'large' ? '1.25rem' : '1.5rem',
+                          lineHeight: '1.75'
+                        }}>
+                          {pageText.map((item, index) => (
+                            <span key={index}>
+                              {item.text.split(/(\s+)/).map((part, i) => {
+                                if (part.trim()) {
+                                  return (
+                                    <span
+                                      key={i}
+                                      onClick={(e) => handleWordClick(part, e)}
+                                      className={`cursor-pointer px-1 rounded transition-all inline-block ${
+                                        darkMode
+                                          ? 'hover:bg-blue-900 active:bg-blue-800'
+                                          : 'hover:bg-yellow-200 active:bg-yellow-300'
+                                      }`}
+                                    >
+                                      {part}
+                                    </span>
+                                  );
+                                }
+                                return <span key={i}>{part}</span>;
+                              })}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Bottom Navigation */}
+                  <div className={`flex items-center justify-between px-4 py-3 border-t flex-shrink-0 ${
+                    darkMode ? 'bg-gray-800 border-gray-700' : 'bg-gray-50 border-gray-200'
+                  }`}>
+                    <button
+                      onClick={() => goToPage(currentPage - 1)}
+                      disabled={currentPage === 1}
+                      className={`flex items-center gap-1 px-4 py-2 rounded-lg transition-colors text-sm ${
+                        darkMode
+                          ? 'bg-gray-700 active:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600'
+                          : 'bg-gray-100 active:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-400'
+                      }`}
+                    >
+                      <ChevronLeft size={18} />
+                      Prev
+                    </button>
+                    
+                    <div className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                      Page {currentPage} of {totalPages}
+                    </div>
+
+                    <button
+                      onClick={() => goToPage(currentPage + 1)}
+                      disabled={currentPage === totalPages}
+                      className={`flex items-center gap-1 px-4 py-2 rounded-lg transition-colors text-sm ${
+                        darkMode
+                          ? 'bg-gray-700 active:bg-gray-600 disabled:bg-gray-800 disabled:text-gray-600'
+                          : 'bg-gray-100 active:bg-gray-200 disabled:bg-gray-50 disabled:text-gray-400'
+                      }`}
+                    >
+                      Next
+                      <ChevronRight size={18} />
+                    </button>
+                  </div>
+
+                  {/* Change Book Button */}
+                  <div className={`p-3 text-center border-t flex-shrink-0 ${
+                    darkMode ? 'border-gray-700' : 'border-gray-200'
+                  }`}>
+                    <button
+                      onClick={() => {
+                        setPdfFile(null);
+                        setPageText('');
+                        setCurrentPage(1);
+                        setTotalPages(0);
+                        setTranslation(null);
+                        setJumpToPageInput('');
+                        setChapters([]);
+                        setSelectedChapter('');
+                        setCurrentBookId(null);
+                        setShowContinuePrompt(false);
+                        setSavedPage(null);
+                      }}
+                      className={`underline text-sm ${
+                        darkMode
+                          ? 'text-gray-400 active:text-gray-300'
+                          : 'text-gray-600 active:text-gray-800'
+                      }`}
+                    >
+                      Back to Library
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Translation Popup */}
+          {translation && (
+            <div
+              className={`fixed rounded-lg shadow-2xl border-2 p-4 z-50 min-w-[200px] max-w-[300px] ${
+                darkMode
+                  ? 'bg-gray-800 border-blue-500'
+                  : 'bg-white border-blue-500'
+              }`}
+              style={{
+                left: `${Math.min(translation.x, window.innerWidth - 220)}px`,
+                top: `${translation.y + translation.height + 8}px`,
+              }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <button
+                onClick={closeTranslation}
+                className={`absolute top-2 right-2 ${
+                  darkMode
+                    ? 'text-gray-500 active:text-gray-400'
+                    : 'text-gray-400 active:text-gray-600'
+                }`}
+              >
+                <X size={16} />
+              </button>
+              <div className={`mb-1 text-sm font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>Spanish</div>
+              <div className={`text-lg font-semibold mb-2 ${darkMode ? 'text-gray-200' : 'text-gray-800'}`}>{translation.word}</div>
+              <div className={`mb-1 text-sm font-medium ${darkMode ? 'text-gray-400' : 'text-gray-500'}`}>English</div>
+              <div className={`text-lg font-semibold ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>{translation.translation}</div>
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // Render the app
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<PDFBookReader />);
+  </script>
+</body>
+</html>
