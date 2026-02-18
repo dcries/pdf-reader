@@ -266,10 +266,13 @@
       const [darkMode, setDarkMode] = useState(false);
       const [headerCollapsed, setHeaderCollapsed] = useState(false);
       const [fontSize, setFontSize] = useState('medium');
+      const [swipeProgress, setSwipeProgress] = useState(0);
       const fileInputRef = useRef(null);
       const contentRef = useRef(null);
       const touchStartX = useRef(0);
       const touchEndX = useRef(0);
+      const touchStartY = useRef(0);
+      const isSwiping = useRef(false);
 
       // Load saved books and dark mode preference on mount
       useEffect(() => {
@@ -428,45 +431,84 @@
         };
       }, [headerCollapsed]);
 
-      // Swipe gesture handling
+      // Swipe gesture handling with visual feedback
       useEffect(() => {
         const handleTouchStart = (e) => {
           touchStartX.current = e.changedTouches[0].screenX;
+          touchStartY.current = e.changedTouches[0].screenY;
+          isSwiping.current = false;
+        };
+
+        const handleTouchMove = (e) => {
+          const currentX = e.changedTouches[0].screenX;
+          const currentY = e.changedTouches[0].screenY;
+          const diffX = touchStartX.current - currentX;
+          const diffY = Math.abs(touchStartY.current - currentY);
+          
+          // Only consider horizontal swipes (ignore vertical scrolling)
+          if (Math.abs(diffX) > 30 && Math.abs(diffX) > diffY * 2) {
+            isSwiping.current = true;
+            
+            // Calculate swipe progress (0 to 1)
+            const progress = Math.min(Math.abs(diffX) / 150, 1);
+            setSwipeProgress(diffX > 0 ? progress : -progress);
+            
+            // Prevent scrolling while swiping
+            if (progress > 0.1) {
+              e.preventDefault();
+            }
+          }
         };
 
         const handleTouchEnd = (e) => {
           touchEndX.current = e.changedTouches[0].screenX;
-          handleSwipe();
-        };
-
-        const handleSwipe = () => {
           const swipeDistance = touchStartX.current - touchEndX.current;
-          const minSwipeDistance = 50;
-
-          if (Math.abs(swipeDistance) > minSwipeDistance) {
+          const swipeDistanceY = Math.abs(touchStartY.current - e.changedTouches[0].screenY);
+          
+          // Reset swipe progress
+          setSwipeProgress(0);
+          
+          // Only trigger page change if:
+          // 1. Swipe distance > 100px (increased from 50px)
+          // 2. Horizontal swipe is dominant (not vertical scroll)
+          // 3. Swipe progress reached at least 60%
+          const minSwipeDistance = 100;
+          const minProgress = 0.6;
+          
+          if (isSwiping.current && 
+              Math.abs(swipeDistance) > minSwipeDistance && 
+              Math.abs(swipeDistance) > swipeDistanceY * 2 &&
+              Math.abs(swipeProgress) >= minProgress) {
+            
             if (swipeDistance > 0) {
+              // Swipe left (next page)
               if (currentPage < totalPages && pdfFile) {
                 goToPage(currentPage + 1);
               }
             } else {
+              // Swipe right (previous page)
               if (currentPage > 1 && pdfFile) {
                 goToPage(currentPage - 1);
               }
             }
           }
+          
+          isSwiping.current = false;
         };
 
         const content = contentRef.current;
         if (content) {
           content.addEventListener('touchstart', handleTouchStart);
+          content.addEventListener('touchmove', handleTouchMove, { passive: false });
           content.addEventListener('touchend', handleTouchEnd);
           
           return () => {
             content.removeEventListener('touchstart', handleTouchStart);
+            content.removeEventListener('touchmove', handleTouchMove);
             content.removeEventListener('touchend', handleTouchEnd);
           };
         }
-      }, [currentPage, totalPages, pdfFile]);
+      }, [currentPage, totalPages, pdfFile, swipeProgress]);
 
       // Detect chapters
       const detectChapters = async (pdf) => {
@@ -1065,10 +1107,45 @@
                     className={`flex-1 overflow-hidden touch-pan-y ${
                       darkMode ? 'bg-gray-900' : 'bg-amber-50'
                     }`}
-                    style={{ height: pageHeight > 0 ? `${pageHeight}px` : 'auto' }}
+                    style={{ 
+                      height: pageHeight > 0 ? `${pageHeight}px` : 'auto',
+                      position: 'relative'
+                    }}
                     onClick={handleReadingAreaClick}
                   >
-                    <div className="h-full overflow-y-auto p-6">
+                    {/* Swipe Progress Indicator */}
+                    {swipeProgress !== 0 && (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          top: 0,
+                          left: swipeProgress > 0 ? 'auto' : 0,
+                          right: swipeProgress > 0 ? 0 : 'auto',
+                          bottom: 0,
+                          width: `${Math.abs(swipeProgress) * 100}%`,
+                          background: swipeProgress > 0 
+                            ? 'linear-gradient(to left, rgba(37, 99, 235, 0.1), transparent)'
+                            : 'linear-gradient(to right, rgba(37, 99, 235, 0.1), transparent)',
+                          pointerEvents: 'none',
+                          transition: 'width 0.1s ease-out',
+                          zIndex: 1
+                        }}
+                      >
+                        <div style={{
+                          position: 'absolute',
+                          top: '50%',
+                          [swipeProgress > 0 ? 'right' : 'left']: '20px',
+                          transform: 'translateY(-50%)',
+                          fontSize: '48px',
+                          opacity: Math.min(Math.abs(swipeProgress) * 2, 1),
+                          color: darkMode ? '#60a5fa' : '#2563eb'
+                        }}>
+                          {swipeProgress > 0 ? '→' : '←'}
+                        </div>
+                      </div>
+                    )}
+                    
+                    <div className="h-full overflow-y-auto p-6" style={{ position: 'relative', zIndex: 2 }}>
                       {loading ? (
                         <div className="flex items-center justify-center h-full">
                           <div className={`animate-spin rounded-full h-12 w-12 border-b-2 ${
