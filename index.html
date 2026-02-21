@@ -267,6 +267,12 @@
       const [headerCollapsed, setHeaderCollapsed] = useState(false);
       const [fontSize, setFontSize] = useState('medium');
       const [swipeProgress, setSwipeProgress] = useState(0);
+      const [syncId, setSyncId] = useState(null);
+      const [syncStatus, setSyncStatus] = useState('idle'); // idle | syncing | synced | error
+      const [showSyncSetup, setShowSyncSetup] = useState(false);
+      const [syncIdInput, setSyncIdInput] = useState('');
+      const [cloudProgress, setCloudProgress] = useState(null); // {page, bookId, lastRead}
+      const [showCloudPrompt, setShowCloudPrompt] = useState(false);
       const fileInputRef = useRef(null);
       const contentRef = useRef(null);
       const touchStartX = useRef(0);
@@ -288,6 +294,10 @@
         const savedFontSize = localStorage.getItem('pdfReaderFontSize');
         if (savedFontSize) {
           setFontSize(savedFontSize);
+        }
+        const savedSyncId = localStorage.getItem('pdfReaderSyncId');
+        if (savedSyncId) {
+          setSyncId(savedSyncId);
         }
       }, []);
 
@@ -358,6 +368,83 @@
         return null;
       };
 
+      // ---- Cloud Sync via JSONBin.io ----
+      const JSONBIN_BASE = 'https://api.jsonbin.io/v3';
+
+      // Create a new sync bin and return its ID
+      const createSyncBin = async () => {
+        try {
+          const res = await fetch(`${JSONBIN_BASE}/b`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'X-Bin-Private': 'false' },
+            body: JSON.stringify({ progress: {} })
+          });
+          const data = await res.json();
+          return data.metadata?.id || null;
+        } catch (e) {
+          console.error('Error creating sync bin:', e);
+          return null;
+        }
+      };
+
+      // Push local progress for a book to the cloud
+      const pushProgressToCloud = async (binId, bookId, page, fileName, totalPages) => {
+        if (!binId) return;
+        try {
+          // First read current bin data
+          const getRes = await fetch(`${JSONBIN_BASE}/b/${binId}/latest`);
+          const getData = await getRes.json();
+          const existing = getData.record?.progress || {};
+          existing[bookId] = { page, fileName, totalPages, lastRead: new Date().toISOString() };
+          await fetch(`${JSONBIN_BASE}/b/${binId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ progress: existing })
+          });
+          setSyncStatus('synced');
+        } catch (e) {
+          console.error('Error pushing to cloud:', e);
+          setSyncStatus('error');
+        }
+      };
+
+      // Fetch progress from cloud for a specific bookId
+      const fetchCloudProgress = async (binId, bookId) => {
+        if (!binId) return null;
+        try {
+          const res = await fetch(`${JSONBIN_BASE}/b/${binId}/latest`);
+          const data = await res.json();
+          const progress = data.record?.progress || {};
+          return progress[bookId] || null;
+        } catch (e) {
+          console.error('Error fetching from cloud:', e);
+          return null;
+        }
+      };
+
+      // Setup sync: create new bin or use existing ID
+      const handleSetupSync = async (existingId) => {
+        setSyncStatus('syncing');
+        let id = existingId?.trim();
+        if (!id) {
+          id = await createSyncBin();
+          if (!id) { setSyncStatus('error'); return; }
+        }
+        localStorage.setItem('pdfReaderSyncId', id);
+        setSyncId(id);
+        setShowSyncSetup(false);
+        setSyncStatus('synced');
+      };
+
+      const handleDisconnectSync = () => {
+        if (confirm('Disconnect cloud sync? Your local progress will remain.')) {
+          localStorage.removeItem('pdfReaderSyncId');
+          setSyncId(null);
+          setSyncStatus('idle');
+        }
+      };
+      // ---- End Cloud Sync ----
+
       // Delete a saved book
       const deleteBook = async (bookId, event) => {
         event.stopPropagation();
@@ -404,7 +491,13 @@
             const fileName = currentBookId.split('_')[0];
             const fileSize = parseInt(currentBookId.split('_')[1]);
             saveProgress(currentBookId, currentPage, fileName, fileSize, totalPages);
-          }, 1000);
+            // Push to cloud if sync is set up
+            const currentSyncId = localStorage.getItem('pdfReaderSyncId');
+            if (currentSyncId) {
+              setSyncStatus('syncing');
+              pushProgressToCloud(currentSyncId, currentBookId, currentPage, fileName, totalPages);
+            }
+          }, 1500);
 
           return () => clearTimeout(timeoutId);
         }
@@ -577,7 +670,7 @@
       const loadPDFFromData = async (fileData, bookId, fileName) => {
         setCurrentBookId(bookId);
         
-        const savedProgress = getSavedProgress(bookId);
+        const localProgress = getSavedProgress(bookId);
         
         setLoading(true);
         try {
@@ -587,18 +680,30 @@
           const pdf = await pdfjsLib.getDocument(fileData).promise;
           setPdfFile(pdf);
           setTotalPages(pdf.numPages);
-          
-          if (savedProgress && savedProgress.currentPage > 1) {
-            setShowContinuePrompt(true);
-            setSavedPage(savedProgress.currentPage);
-            setCurrentPage(1);
-            await loadPage(pdf, 1);
-          } else {
-            setCurrentPage(1);
-            await loadPage(pdf, 1);
-          }
-          
+          setCurrentPage(1);
+          await loadPage(pdf, 1);
           detectChapters(pdf);
+
+          // Check cloud progress (if sync is set up)
+          const currentSyncId = localStorage.getItem('pdfReaderSyncId');
+          if (currentSyncId) {
+            setSyncStatus('syncing');
+            const cloud = await fetchCloudProgress(currentSyncId, bookId);
+            setSyncStatus('synced');
+            const localPage = localProgress?.currentPage || 1;
+            const cloudPage = cloud?.page || 1;
+            // Show the highest page we know about, preferring cloud if newer or further
+            const cloudNewer = cloud && (!localProgress || new Date(cloud.lastRead) > new Date(localProgress.lastRead));
+            const bestPage = cloudNewer ? cloudPage : localPage;
+            if (bestPage > 1) {
+              setSavedPage(bestPage);
+              setCloudProgress(cloud && cloudNewer ? cloud : null);
+              setShowContinuePrompt(true);
+            }
+          } else if (localProgress && localProgress.currentPage > 1) {
+            setShowContinuePrompt(true);
+            setSavedPage(localProgress.currentPage);
+          }
         } catch (error) {
           console.error('Error loading PDF:', error);
           alert('Error loading PDF file');
@@ -924,6 +1029,79 @@
                         </p>
                       </div>
                     )}
+
+                    {/* Cloud Sync Section */}
+                    <div className={`mt-8 p-4 rounded-lg border ${darkMode ? 'border-gray-700 bg-gray-800' : 'border-gray-200 bg-gray-50'}`}>
+                      <div className="flex items-center justify-between mb-3">
+                        <h3 className={`text-sm font-semibold flex items-center gap-2 ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8h1a4 4 0 0 1 0 8h-1"/><path d="M2 8h16v9a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4V8z"/><line x1="6" y1="1" x2="6" y2="4"/><line x1="10" y1="1" x2="10" y2="4"/><line x1="14" y1="1" x2="14" y2="4"/></svg>
+                          Cross-Device Sync
+                          {syncStatus === 'syncing' && <span className="text-xs text-blue-500 animate-pulse">● syncing…</span>}
+                          {syncStatus === 'synced' && syncId && <span className="text-xs text-green-500">● synced</span>}
+                          {syncStatus === 'error' && <span className="text-xs text-red-500">● error</span>}
+                        </h3>
+                        {syncId && (
+                          <button onClick={handleDisconnectSync} className={`text-xs underline ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Disconnect</button>
+                        )}
+                      </div>
+                      {!syncId ? (
+                        showSyncSetup ? (
+                          <div>
+                            <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                              <strong>New device?</strong> Paste your Sync ID from another device.<br/>
+                              <strong>First time?</strong> Leave blank and tap "Create" to get a new Sync ID.
+                            </p>
+                            <div className="flex gap-2">
+                              <input
+                                type="text"
+                                value={syncIdInput}
+                                onChange={e => setSyncIdInput(e.target.value)}
+                                placeholder="Paste Sync ID (or leave blank)"
+                                className={`flex-1 px-3 py-2 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-200 placeholder-gray-500' : 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'}`}
+                                style={{WebkitUserSelect:'auto', userSelect:'auto'}}
+                              />
+                              <button
+                                onClick={() => handleSetupSync(syncIdInput)}
+                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800"
+                              >
+                                {syncIdInput.trim() ? 'Connect' : 'Create'}
+                              </button>
+                            </div>
+                            <button onClick={() => setShowSyncSetup(false)} className={`mt-2 text-xs underline ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Cancel</button>
+                          </div>
+                        ) : (
+                          <div>
+                            <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                              Sync your reading position across your iPhone and iPad. Your page progress will be saved to the cloud.
+                            </p>
+                            <button
+                              onClick={() => setShowSyncSetup(true)}
+                              className={`w-full py-2 rounded-lg text-sm font-medium border transition-colors ${darkMode ? 'border-blue-500 text-blue-400 active:bg-gray-700' : 'border-blue-600 text-blue-600 active:bg-blue-50'}`}
+                            >
+                              Set Up Sync
+                            </button>
+                          </div>
+                        )
+                      ) : (
+                        <div>
+                          <p className={`text-xs mb-2 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                            Sync is active. Use this ID on your other device:
+                          </p>
+                          <div className={`flex items-center gap-2 p-2 rounded font-mono text-xs break-all ${darkMode ? 'bg-gray-700 text-green-400' : 'bg-gray-100 text-green-700'}`}>
+                            <span className="flex-1">{syncId}</span>
+                            <button
+                              onClick={() => { navigator.clipboard?.writeText(syncId); setSyncStatus('synced'); }}
+                              className="shrink-0 px-2 py-1 rounded bg-blue-600 text-white text-xs"
+                            >
+                              Copy
+                            </button>
+                          </div>
+                          <p className={`mt-2 text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
+                            On your other device: tap "Set Up Sync" → paste this ID → tap "Connect"
+                          </p>
+                        </div>
+                      )}
+                    </div>
                   </div>
                 </div>
               )}
@@ -936,9 +1114,16 @@
                       <BookMarked size={24} className={darkMode ? 'text-blue-400' : 'text-blue-600'} />
                       <h2 className={`text-xl font-bold ${darkMode ? 'text-gray-100' : 'text-gray-900'}`}>Welcome Back!</h2>
                     </div>
-                    <p className={`mb-6 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
-                      You were last reading on page {savedPage}. Would you like to continue from where you left off?
+                    <p className={`mb-2 ${darkMode ? 'text-gray-300' : 'text-gray-600'}`}>
+                      You were last reading on page <strong>{savedPage}</strong>.
                     </p>
+                    {cloudProgress && (
+                      <p className={`mb-4 text-xs flex items-center gap-1 ${darkMode ? 'text-green-400' : 'text-green-600'}`}>
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07A19.5 19.5 0 0 1 4.36 12 19.79 19.79 0 0 1 1.21 3.18C1.2 2.09 2.04 1.2 3.13 1h3a2 2 0 0 1 2 1.72c.127.96.361 1.903.7 2.81a2 2 0 0 1-.45 2.11L7.09 8.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.907.339 1.85.573 2.81.7A2 2 0 0 1 21 16z"/></svg>
+                        Synced from your other device
+                      </p>
+                    )}
+                    {!cloudProgress && <p className={`mb-4 ${darkMode ? 'text-gray-400' : 'text-gray-500'}`} style={{fontSize:'0.8rem'}}>Would you like to continue from where you left off?</p>}
                     <div className="flex gap-3">
                       <button
                         onClick={handleStartFromBeginning}
@@ -948,13 +1133,13 @@
                             : 'border border-gray-300 text-gray-700 hover:bg-gray-50 active:bg-gray-100'
                         }`}
                       >
-                        Start from Beginning
+                        Start over
                       </button>
                       <button
                         onClick={handleContinueReading}
                         className="flex-1 px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 active:bg-blue-800"
                       >
-                        Continue Reading
+                        Go to page {savedPage}
                       </button>
                     </div>
                   </div>
@@ -987,6 +1172,11 @@
                         <div className={`text-lg font-semibold ${darkMode ? 'text-gray-200' : 'text-gray-900'}`}>
                           {currentPage} / {totalPages}
                         </div>
+                        {syncId && (
+                          <div className={`text-xs mt-0.5 ${syncStatus === 'syncing' ? 'text-blue-400 animate-pulse' : syncStatus === 'error' ? 'text-red-400' : 'text-green-500'}`}>
+                            {syncStatus === 'syncing' ? '⟳ syncing' : syncStatus === 'error' ? '✕ sync error' : '✓ synced'}
+                          </div>
+                        )}
                       </div>
 
                       <button
