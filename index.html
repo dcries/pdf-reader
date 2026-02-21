@@ -247,6 +247,64 @@
       </svg>
     );
 
+    // Sync setup form component
+    function SyncSetupForm({ darkMode, onCancel, onSetup, onConnect, syncStatus }) {
+      const [mode, setMode] = React.useState('choose'); // choose | first | second
+      const [token, setToken] = React.useState('');
+      const [gistId, setGistId] = React.useState('');
+      const inputClass = `w-full px-3 py-2 rounded-lg text-sm border mt-1 ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-200 placeholder-gray-500' : 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'}`;
+      const inputStyle = {WebkitUserSelect:'auto', userSelect:'auto'};
+
+      if (mode === 'choose') return (
+        <div className="space-y-2">
+          <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Is this your first device setting up sync?</p>
+          <button onClick={() => setMode('first')} className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800">
+            Yes — set up sync for the first time
+          </button>
+          <button onClick={() => setMode('second')} className={`w-full py-2 px-4 rounded-lg text-sm font-medium border ${darkMode ? 'border-gray-600 text-gray-300 active:bg-gray-700' : 'border-gray-300 text-gray-700 active:bg-gray-50'}`}>
+            No — connect to existing sync
+          </button>
+          <button onClick={onCancel} className={`w-full text-xs underline mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Cancel</button>
+        </div>
+      );
+
+      if (mode === 'first') return (
+        <div>
+          <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+            Paste your GitHub Personal Access Token (with <strong>gist</strong> scope). The app will create a secret Gist automatically.
+          </p>
+          <label className={`text-xs font-medium ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>GitHub Token</label>
+          <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" className={inputClass} style={inputStyle} />
+          {syncStatus === 'error' && <p className="text-xs text-red-500 mt-1">Invalid token — double-check it and try again.</p>}
+          <div className="flex gap-2 mt-3">
+            <button onClick={() => setMode('choose')} className={`flex-1 py-2 rounded-lg text-sm border ${darkMode ? 'border-gray-600 text-gray-400' : 'border-gray-300 text-gray-600'}`}>Back</button>
+            <button onClick={() => onSetup(token)} disabled={!token.trim()} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800 disabled:opacity-50">
+              {syncStatus === 'syncing' ? 'Creating…' : 'Create & Connect'}
+            </button>
+          </div>
+        </div>
+      );
+
+      if (mode === 'second') return (
+        <div>
+          <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+            Enter your GitHub token and the Gist ID shown on your other device.
+          </p>
+          <label className={`text-xs font-medium ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>GitHub Token</label>
+          <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" className={inputClass} style={inputStyle} />
+          <label className={`text-xs font-medium mt-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Gist ID</label>
+          <input type="text" value={gistId} onChange={e => setGistId(e.target.value)} placeholder="e.g. a1b2c3d4e5f6..." className={inputClass} style={inputStyle} />
+          {syncStatus === 'error' && <p className="text-xs text-red-500 mt-1">Could not connect — check both values and try again.</p>}
+          <div className="flex gap-2 mt-3">
+            <button onClick={() => setMode('choose')} className={`flex-1 py-2 rounded-lg text-sm border ${darkMode ? 'border-gray-600 text-gray-400' : 'border-gray-300 text-gray-600'}`}>Back</button>
+            <button onClick={() => onConnect(token, gistId)} disabled={!token.trim() || !gistId.trim()} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800 disabled:opacity-50">
+              {syncStatus === 'syncing' ? 'Connecting…' : 'Connect'}
+            </button>
+          </div>
+        </div>
+      );
+    }
+
     function PDFBookReader() {
       const [pdfFile, setPdfFile] = useState(null);
       const [currentPage, setCurrentPage] = useState(1);
@@ -268,10 +326,9 @@
       const [fontSize, setFontSize] = useState('medium');
       const [swipeProgress, setSwipeProgress] = useState(0);
       const [syncId, setSyncId] = useState(null);
-      const [syncStatus, setSyncStatus] = useState('idle'); // idle | syncing | synced | error
+      const [syncStatus, setSyncStatus] = useState('idle');
       const [showSyncSetup, setShowSyncSetup] = useState(false);
-      const [syncIdInput, setSyncIdInput] = useState('');
-      const [cloudProgress, setCloudProgress] = useState(null); // {page, bookId, lastRead}
+      const [cloudProgress, setCloudProgress] = useState(null);
       const [showCloudPrompt, setShowCloudPrompt] = useState(false);
       const fileInputRef = useRef(null);
       const contentRef = useRef(null);
@@ -368,76 +425,123 @@
         return null;
       };
 
-      // ---- Cloud Sync via JSONBin.io ----
-      const JSONBIN_BASE = 'https://api.jsonbin.io/v3';
+      // ---- Cloud Sync via GitHub Gist ----
+      const GIST_API = 'https://api.github.com/gists';
+      const GIST_FILENAME = 'pdf-reader-progress.json';
 
-      // Create a new sync bin and return its ID
-      const createSyncBin = async () => {
+      // Create a new secret Gist and return its ID
+      const createGist = async (token) => {
         try {
-          const res = await fetch(`${JSONBIN_BASE}/b`, {
+          const res = await fetch(GIST_API, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'X-Bin-Private': 'false' },
-            body: JSON.stringify({ progress: {} })
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `token ${token}`,
+              'Accept': 'application/vnd.github+json'
+            },
+            body: JSON.stringify({
+              description: 'PDF Reader sync data',
+              public: false,
+              files: {
+                [GIST_FILENAME]: { content: JSON.stringify({ progress: {} }) }
+              }
+            })
           });
+          if (!res.ok) return null;
           const data = await res.json();
-          return data.metadata?.id || null;
+          return data.id || null;
         } catch (e) {
-          console.error('Error creating sync bin:', e);
+          console.error('Error creating Gist:', e);
           return null;
         }
       };
 
-      // Push local progress for a book to the cloud
-      const pushProgressToCloud = async (binId, bookId, page, fileName, totalPages) => {
-        if (!binId) return;
+      // Push progress to the Gist
+      const pushProgressToCloud = async (gistId, token, bookId, page, fileName, totalPages) => {
+        if (!gistId || !token) return;
         try {
-          // First read current bin data
-          const getRes = await fetch(`${JSONBIN_BASE}/b/${binId}/latest`);
+          // Read existing data first
+          const getRes = await fetch(`${GIST_API}/${gistId}`, {
+            headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github+json' }
+          });
+          if (!getRes.ok) { setSyncStatus('error'); return; }
           const getData = await getRes.json();
-          const existing = getData.record?.progress || {};
-          existing[bookId] = { page, fileName, totalPages, lastRead: new Date().toISOString() };
-          await fetch(`${JSONBIN_BASE}/b/${binId}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ progress: existing })
+          const raw = getData.files?.[GIST_FILENAME]?.content || '{"progress":{}}';
+          const existing = JSON.parse(raw);
+          existing.progress = existing.progress || {};
+          existing.progress[bookId] = { page, fileName, totalPages, lastRead: new Date().toISOString() };
+
+          await fetch(`${GIST_API}/${gistId}`, {
+            method: 'PATCH',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `token ${token}`,
+              'Accept': 'application/vnd.github+json'
+            },
+            body: JSON.stringify({
+              files: { [GIST_FILENAME]: { content: JSON.stringify(existing) } }
+            })
           });
           setSyncStatus('synced');
         } catch (e) {
-          console.error('Error pushing to cloud:', e);
+          console.error('Error pushing to Gist:', e);
           setSyncStatus('error');
         }
       };
 
-      // Fetch progress from cloud for a specific bookId
-      const fetchCloudProgress = async (binId, bookId) => {
-        if (!binId) return null;
+      // Fetch progress for a book from the Gist
+      const fetchCloudProgress = async (gistId, token, bookId) => {
+        if (!gistId || !token) return null;
         try {
-          const res = await fetch(`${JSONBIN_BASE}/b/${binId}/latest`);
+          const res = await fetch(`${GIST_API}/${gistId}`, {
+            headers: { 'Authorization': `token ${token}`, 'Accept': 'application/vnd.github+json' }
+          });
+          if (!res.ok) return null;
           const data = await res.json();
-          const progress = data.record?.progress || {};
-          return progress[bookId] || null;
+          const raw = data.files?.[GIST_FILENAME]?.content || '{"progress":{}}';
+          const parsed = JSON.parse(raw);
+          return parsed.progress?.[bookId] || null;
         } catch (e) {
-          console.error('Error fetching from cloud:', e);
+          console.error('Error fetching from Gist:', e);
           return null;
         }
       };
 
-      // Setup sync: create new bin or use existing ID
-      const handleSetupSync = async (existingId) => {
+      // Setup sync with a GitHub token — creates a new Gist automatically
+      const handleSetupSync = async (token) => {
+        const trimmed = token?.trim();
+        if (!trimmed) { setSyncStatus('error'); return; }
         setSyncStatus('syncing');
-        let id = existingId?.trim();
-        if (!id) {
-          id = await createSyncBin();
-          if (!id) { setSyncStatus('error'); return; }
-        }
-        localStorage.setItem('pdfReaderSyncId', id);
-        setSyncId(id);
+        const gistId = await createGist(trimmed);
+        if (!gistId) { setSyncStatus('error'); return; }
+        localStorage.setItem('pdfReaderSyncToken', trimmed);
+        localStorage.setItem('pdfReaderSyncId', gistId);
+        setSyncId(gistId);
+        setShowSyncSetup(false);
+        setSyncStatus('synced');
+      };
+
+      // Connect to an existing Gist on a second device using token + gist ID
+      const handleConnectSync = async (token, gistId) => {
+        const trimmedToken = token?.trim();
+        const trimmedGist = gistId?.trim();
+        if (!trimmedToken || !trimmedGist) { setSyncStatus('error'); return; }
+        setSyncStatus('syncing');
+        // Verify the gist is accessible
+        const res = await fetch(`${GIST_API}/${trimmedGist}`, {
+          headers: { 'Authorization': `token ${trimmedToken}`, 'Accept': 'application/vnd.github+json' }
+        });
+        if (!res.ok) { setSyncStatus('error'); return; }
+        localStorage.setItem('pdfReaderSyncToken', trimmedToken);
+        localStorage.setItem('pdfReaderSyncId', trimmedGist);
+        setSyncId(trimmedGist);
         setShowSyncSetup(false);
         setSyncStatus('synced');
       };
 
       const handleDisconnectSync = () => {
         if (confirm('Disconnect cloud sync? Your local progress will remain.')) {
+          localStorage.removeItem('pdfReaderSyncToken');
           localStorage.removeItem('pdfReaderSyncId');
           setSyncId(null);
           setSyncStatus('idle');
@@ -493,9 +597,10 @@
             saveProgress(currentBookId, currentPage, fileName, fileSize, totalPages);
             // Push to cloud if sync is set up
             const currentSyncId = localStorage.getItem('pdfReaderSyncId');
-            if (currentSyncId) {
+            const currentToken = localStorage.getItem('pdfReaderSyncToken');
+            if (currentSyncId && currentToken) {
               setSyncStatus('syncing');
-              pushProgressToCloud(currentSyncId, currentBookId, currentPage, fileName, totalPages);
+              pushProgressToCloud(currentSyncId, currentToken, currentBookId, currentPage, fileName, totalPages);
             }
           }, 1500);
 
@@ -686,9 +791,10 @@
 
           // Check cloud progress (if sync is set up)
           const currentSyncId = localStorage.getItem('pdfReaderSyncId');
-          if (currentSyncId) {
+          const currentToken = localStorage.getItem('pdfReaderSyncToken');
+          if (currentSyncId && currentToken) {
             setSyncStatus('syncing');
-            const cloud = await fetchCloudProgress(currentSyncId, bookId);
+            const cloud = await fetchCloudProgress(currentSyncId, currentToken, bookId);
             setSyncStatus('synced');
             const localPage = localProgress?.currentPage || 1;
             const cloudPage = cloud?.page || 1;
@@ -1038,41 +1144,26 @@
                           Cross-Device Sync
                           {syncStatus === 'syncing' && <span className="text-xs text-blue-500 animate-pulse">● syncing…</span>}
                           {syncStatus === 'synced' && syncId && <span className="text-xs text-green-500">● synced</span>}
-                          {syncStatus === 'error' && <span className="text-xs text-red-500">● error</span>}
+                          {syncStatus === 'error' && <span className="text-xs text-red-500">● error — check token</span>}
                         </h3>
                         {syncId && (
                           <button onClick={handleDisconnectSync} className={`text-xs underline ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Disconnect</button>
                         )}
                       </div>
+
                       {!syncId ? (
                         showSyncSetup ? (
-                          <div>
-                            <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                              <strong>New device?</strong> Paste your Sync ID from another device.<br/>
-                              <strong>First time?</strong> Leave blank and tap "Create" to get a new Sync ID.
-                            </p>
-                            <div className="flex gap-2">
-                              <input
-                                type="text"
-                                value={syncIdInput}
-                                onChange={e => setSyncIdInput(e.target.value)}
-                                placeholder="Paste Sync ID (or leave blank)"
-                                className={`flex-1 px-3 py-2 rounded-lg text-sm border ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-200 placeholder-gray-500' : 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'}`}
-                                style={{WebkitUserSelect:'auto', userSelect:'auto'}}
-                              />
-                              <button
-                                onClick={() => handleSetupSync(syncIdInput)}
-                                className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800"
-                              >
-                                {syncIdInput.trim() ? 'Connect' : 'Create'}
-                              </button>
-                            </div>
-                            <button onClick={() => setShowSyncSetup(false)} className={`mt-2 text-xs underline ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Cancel</button>
-                          </div>
+                          <SyncSetupForm
+                            darkMode={darkMode}
+                            onCancel={() => setShowSyncSetup(false)}
+                            onSetup={handleSetupSync}
+                            onConnect={handleConnectSync}
+                            syncStatus={syncStatus}
+                          />
                         ) : (
                           <div>
                             <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                              Sync your reading position across your iPhone and iPad. Your page progress will be saved to the cloud.
+                              Sync your reading position across your iPhone and iPad using your GitHub account.
                             </p>
                             <button
                               onClick={() => setShowSyncSetup(true)}
@@ -1084,20 +1175,20 @@
                         )
                       ) : (
                         <div>
-                          <p className={`text-xs mb-2 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                            Sync is active. Use this ID on your other device:
+                          <p className={`text-xs mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                            Sync is active via GitHub Gist. To set up your other device, you'll need your token and this Gist ID:
                           </p>
-                          <div className={`flex items-center gap-2 p-2 rounded font-mono text-xs break-all ${darkMode ? 'bg-gray-700 text-green-400' : 'bg-gray-100 text-green-700'}`}>
+                          <div className={`flex items-center gap-2 p-2 rounded font-mono text-xs break-all mt-2 ${darkMode ? 'bg-gray-700 text-green-400' : 'bg-gray-100 text-green-700'}`}>
                             <span className="flex-1">{syncId}</span>
                             <button
-                              onClick={() => { navigator.clipboard?.writeText(syncId); setSyncStatus('synced'); }}
+                              onClick={() => navigator.clipboard?.writeText(syncId)}
                               className="shrink-0 px-2 py-1 rounded bg-blue-600 text-white text-xs"
                             >
                               Copy
                             </button>
                           </div>
                           <p className={`mt-2 text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                            On your other device: tap "Set Up Sync" → paste this ID → tap "Connect"
+                            On your other device: tap "Set Up Sync" → choose "Connect existing" → paste your token + this Gist ID.
                           </p>
                         </div>
                       )}
