@@ -247,21 +247,90 @@
       </svg>
     );
 
-    // Sync setup form component
-    function SyncSetupForm({ darkMode, onCancel, onSetup, onConnect, syncStatus }) {
-      const [mode, setMode] = React.useState('choose'); // choose | first | second
+    // Copy to clipboard with iOS fallback
+    function copyToClipboard(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        return navigator.clipboard.writeText(text);
+      }
+      // Fallback for iOS Safari
+      const el = document.createElement('textarea');
+      el.value = text;
+      el.style.position = 'fixed';
+      el.style.opacity = '0';
+      document.body.appendChild(el);
+      el.focus();
+      el.select();
+      document.execCommand('copy');
+      document.body.removeChild(el);
+      return Promise.resolve();
+    }
+
+    // Copy button with visual confirmation
+    function CopyGistButton({ gistId, darkMode }) {
+      const [copied, setCopied] = React.useState(false);
+      const handleCopy = () => {
+        copyToClipboard(gistId).then(() => {
+          setCopied(true);
+          setTimeout(() => setCopied(false), 2000);
+        }).catch(() => {
+          alert('Could not copy automatically. Please long-press the ID above and copy it manually.');
+        });
+      };
+      return (
+        <button
+          onClick={handleCopy}
+          className={`w-full py-2 rounded-lg text-sm font-medium transition-colors ${
+            copied
+              ? 'bg-green-600 text-white'
+              : 'bg-blue-600 text-white active:bg-blue-800'
+          }`}
+        >
+          {copied ? '✓ Copied!' : 'Copy Gist ID'}
+        </button>
+      );
+    }
+
+    // Sync setup form component — manages its own busy/error state
+    function SyncSetupForm({ darkMode, onCancel, onSetup, onConnect }) {
+      const [mode, setMode] = React.useState('choose');
       const [token, setToken] = React.useState('');
       const [gistId, setGistId] = React.useState('');
+      const [busy, setBusy] = React.useState(false);
+      const [error, setError] = React.useState('');
+
       const inputClass = `w-full px-3 py-2 rounded-lg text-sm border mt-1 ${darkMode ? 'bg-gray-700 border-gray-600 text-gray-200 placeholder-gray-500' : 'bg-white border-gray-300 text-gray-800 placeholder-gray-400'}`;
-      const inputStyle = {WebkitUserSelect:'auto', userSelect:'auto'};
+      const inputStyle = {WebkitUserSelect:'auto', userSelect:'auto', WebkitAppearance:'none'};
+
+      const handleSetup = async () => {
+        setError('');
+        setBusy(true);
+        try {
+          await onSetup(token.trim());
+        } catch(e) {
+          setError('Invalid token — double-check it and try again.');
+        }
+        setBusy(false);
+      };
+
+      const handleConnect = async () => {
+        setError('');
+        setBusy(true);
+        try {
+          const ok = await onConnect(token.trim(), gistId.trim());
+          if (ok === false) setError('Could not connect — check both values and try again.');
+        } catch(e) {
+          setError('Could not connect — check both values and try again.');
+        }
+        setBusy(false);
+      };
 
       if (mode === 'choose') return (
         <div className="space-y-2">
           <p className={`text-xs mb-3 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>Is this your first device setting up sync?</p>
-          <button onClick={() => setMode('first')} className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800">
-            Yes — set up sync for the first time
+          <button onClick={() => { setError(''); setMode('first'); }} className="w-full py-2 px-4 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800">
+            Yes — first time setup
           </button>
-          <button onClick={() => setMode('second')} className={`w-full py-2 px-4 rounded-lg text-sm font-medium border ${darkMode ? 'border-gray-600 text-gray-300 active:bg-gray-700' : 'border-gray-300 text-gray-700 active:bg-gray-50'}`}>
+          <button onClick={() => { setError(''); setMode('second'); }} className={`w-full py-2 px-4 rounded-lg text-sm font-medium border ${darkMode ? 'border-gray-600 text-gray-300 active:bg-gray-700' : 'border-gray-300 text-gray-700 active:bg-gray-50'}`}>
             No — connect to existing sync
           </button>
           <button onClick={onCancel} className={`w-full text-xs underline mt-1 ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>Cancel</button>
@@ -274,12 +343,15 @@
             Paste your GitHub Personal Access Token (with <strong>gist</strong> scope). The app will create a secret Gist automatically.
           </p>
           <label className={`text-xs font-medium ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>GitHub Token</label>
-          <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" className={inputClass} style={inputStyle} />
-          {syncStatus === 'error' && <p className="text-xs text-red-500 mt-1">Invalid token — double-check it and try again.</p>}
+          <input type="text" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck="false"
+            value={token} onChange={e => setToken(e.target.value)}
+            placeholder="ghp_xxxxxxxxxxxx" className={inputClass} style={inputStyle} />
+          {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
           <div className="flex gap-2 mt-3">
             <button onClick={() => setMode('choose')} className={`flex-1 py-2 rounded-lg text-sm border ${darkMode ? 'border-gray-600 text-gray-400' : 'border-gray-300 text-gray-600'}`}>Back</button>
-            <button onClick={() => onSetup(token)} disabled={!token.trim()} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800 disabled:opacity-50">
-              {syncStatus === 'syncing' ? 'Creating…' : 'Create & Connect'}
+            <button onClick={handleSetup} disabled={!token.trim() || busy}
+              className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800 disabled:opacity-50">
+              {busy ? 'Creating…' : 'Create & Connect'}
             </button>
           </div>
         </div>
@@ -291,14 +363,19 @@
             Enter your GitHub token and the Gist ID shown on your other device.
           </p>
           <label className={`text-xs font-medium ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>GitHub Token</label>
-          <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="ghp_xxxxxxxxxxxx" className={inputClass} style={inputStyle} />
+          <input type="text" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck="false"
+            value={token} onChange={e => setToken(e.target.value)}
+            placeholder="ghp_xxxxxxxxxxxx" className={inputClass} style={inputStyle} />
           <label className={`text-xs font-medium mt-3 block ${darkMode ? 'text-gray-300' : 'text-gray-700'}`}>Gist ID</label>
-          <input type="text" value={gistId} onChange={e => setGistId(e.target.value)} placeholder="e.g. a1b2c3d4e5f6..." className={inputClass} style={inputStyle} />
-          {syncStatus === 'error' && <p className="text-xs text-red-500 mt-1">Could not connect — check both values and try again.</p>}
+          <input type="text" autoComplete="off" autoCorrect="off" autoCapitalize="off" spellCheck="false"
+            value={gistId} onChange={e => setGistId(e.target.value)}
+            placeholder="e.g. a1b2c3d4e5f6..." className={inputClass} style={inputStyle} />
+          {error && <p className="text-xs text-red-500 mt-1">{error}</p>}
           <div className="flex gap-2 mt-3">
             <button onClick={() => setMode('choose')} className={`flex-1 py-2 rounded-lg text-sm border ${darkMode ? 'border-gray-600 text-gray-400' : 'border-gray-300 text-gray-600'}`}>Back</button>
-            <button onClick={() => onConnect(token, gistId)} disabled={!token.trim() || !gistId.trim()} className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800 disabled:opacity-50">
-              {syncStatus === 'syncing' ? 'Connecting…' : 'Connect'}
+            <button onClick={handleConnect} disabled={!token.trim() || !gistId.trim() || busy}
+              className="flex-1 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium active:bg-blue-800 disabled:opacity-50">
+              {busy ? 'Connecting…' : 'Connect'}
             </button>
           </div>
         </div>
@@ -525,18 +602,23 @@
       const handleConnectSync = async (token, gistId) => {
         const trimmedToken = token?.trim();
         const trimmedGist = gistId?.trim();
-        if (!trimmedToken || !trimmedGist) { setSyncStatus('error'); return; }
+        if (!trimmedToken || !trimmedGist) { setSyncStatus('error'); return false; }
         setSyncStatus('syncing');
-        // Verify the gist is accessible
-        const res = await fetch(`${GIST_API}/${trimmedGist}`, {
-          headers: { 'Authorization': `token ${trimmedToken}`, 'Accept': 'application/vnd.github+json' }
-        });
-        if (!res.ok) { setSyncStatus('error'); return; }
-        localStorage.setItem('pdfReaderSyncToken', trimmedToken);
-        localStorage.setItem('pdfReaderSyncId', trimmedGist);
-        setSyncId(trimmedGist);
-        setShowSyncSetup(false);
-        setSyncStatus('synced');
+        try {
+          const res = await fetch(`${GIST_API}/${trimmedGist}`, {
+            headers: { 'Authorization': `token ${trimmedToken}`, 'Accept': 'application/vnd.github+json' }
+          });
+          if (!res.ok) { setSyncStatus('error'); return false; }
+          localStorage.setItem('pdfReaderSyncToken', trimmedToken);
+          localStorage.setItem('pdfReaderSyncId', trimmedGist);
+          setSyncId(trimmedGist);
+          setShowSyncSetup(false);
+          setSyncStatus('synced');
+          return true;
+        } catch(e) {
+          setSyncStatus('error');
+          return false;
+        }
       };
 
       const handleDisconnectSync = () => {
@@ -1158,7 +1240,6 @@
                             onCancel={() => setShowSyncSetup(false)}
                             onSetup={handleSetupSync}
                             onConnect={handleConnectSync}
-                            syncStatus={syncStatus}
                           />
                         ) : (
                           <div>
@@ -1175,20 +1256,15 @@
                         )
                       ) : (
                         <div>
-                          <p className={`text-xs mb-1 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
-                            Sync is active via GitHub Gist. To set up your other device, you'll need your token and this Gist ID:
+                          <p className={`text-xs mb-2 ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                            Sync is active via GitHub Gist. To connect your other device you'll need your GitHub token and this Gist ID:
                           </p>
-                          <div className={`flex items-center gap-2 p-2 rounded font-mono text-xs break-all mt-2 ${darkMode ? 'bg-gray-700 text-green-400' : 'bg-gray-100 text-green-700'}`}>
-                            <span className="flex-1">{syncId}</span>
-                            <button
-                              onClick={() => navigator.clipboard?.writeText(syncId)}
-                              className="shrink-0 px-2 py-1 rounded bg-blue-600 text-white text-xs"
-                            >
-                              Copy
-                            </button>
+                          <div className={`p-2 rounded font-mono text-xs break-all mb-2 ${darkMode ? 'bg-gray-700 text-green-400' : 'bg-gray-100 text-green-700'}`}>
+                            {syncId}
                           </div>
+                          <CopyGistButton gistId={syncId} darkMode={darkMode} />
                           <p className={`mt-2 text-xs ${darkMode ? 'text-gray-500' : 'text-gray-400'}`}>
-                            On your other device: tap "Set Up Sync" → choose "Connect existing" → paste your token + this Gist ID.
+                            On your other device: tap "Set Up Sync" → "No — connect to existing sync" → paste your token + this Gist ID.
                           </p>
                         </div>
                       )}
