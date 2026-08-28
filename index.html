@@ -13,7 +13,42 @@
   <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
   <script src="https://unpkg.com/@babel/standalone@7/babel.min.js"></script>
   <script src="https://cdn.tailwindcss.com"></script>
-  
+
+  <!-- In-browser offline translation model (Xenova/opus-mt-es-en via transformers.js) -->
+  <script type="module">
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.17.2';
+
+    // Only use the remote model hub for the initial download; after that,
+    // transformers.js caches the weights in the browser's Cache Storage,
+    // so subsequent loads work with no network connection at all.
+    env.allowLocalModels = false;
+    env.useBrowserCache = true;
+
+    let translatorPromise = null;
+    let progressListeners = [];
+
+    // Exposed to the non-module React script below.
+    // onProgress receives raw transformers.js progress events; the caller
+    // is responsible for filtering/formatting them.
+    window.getOfflineTranslator = (onProgress) => {
+      if (onProgress) progressListeners.push(onProgress);
+      if (!translatorPromise) {
+        translatorPromise = pipeline('translation', 'Xenova/opus-mt-es-en', {
+          progress_callback: (data) => {
+            progressListeners.forEach((fn) => {
+              try { fn(data); } catch (e) { /* listener errors shouldn't break loading */ }
+            });
+          }
+        }).catch((err) => {
+          // Reset so a later retry can try again instead of being stuck on a rejected promise
+          translatorPromise = null;
+          throw err;
+        });
+      }
+      return translatorPromise;
+    };
+  </script>
+
   <!-- Service Worker Registration for PWA -->
   <script>
     if ('serviceWorker' in navigator) {
@@ -408,6 +443,9 @@
       const [showSyncSetup, setShowSyncSetup] = useState(false);
       const [cloudProgress, setCloudProgress] = useState(null);
       const [showCloudPrompt, setShowCloudPrompt] = useState(false);
+      const [translatorStatus, setTranslatorStatus] = useState('idle'); // idle | loading | ready | error
+      const [translatorProgress, setTranslatorProgress] = useState(0); // 0-100
+      const translatorRef = useRef(null);
       const fileInputRef = useRef(null);
       const contentRef = useRef(null);
       const touchStartX = useRef(0);
@@ -450,6 +488,16 @@
       useEffect(() => {
         localStorage.setItem('pdfReaderFontSize', fontSize);
       }, [fontSize]);
+
+      // Once a book is open, quietly start downloading/loading the offline
+      // translation model in the background so it's ready by the time the
+      // reader taps a word. Safe to call more than once - ensureTranslator
+      // dedupes via translatorRef / the module-level promise.
+      useEffect(() => {
+        if (pdfFile) {
+          ensureTranslator().catch(() => { /* surfaced via translatorStatus */ });
+        }
+      }, [pdfFile]);
 
       // Load saved books from localStorage
       const loadSavedBooks = () => {
@@ -1031,7 +1079,34 @@
       // Embedded offline Spanish-English dictionary (327 most common words)
       const offlineDictionary = {"el":"the","la":"the","de":"of/from","que":"that/which","y":"and","a":"to","en":"in","un":"a/an","ser":"to be","se":"oneself","no":"no/not","haber":"to have","por":"by/for","con":"with","su":"his/her/their","para":"for","como":"as/like","estar":"to be","tener":"to have","le":"him/her","lo":"it/him","todo":"all/everything","pero":"but","más":"more","hacer":"to do/make","o":"or","poder":"to be able/can","decir":"to say/tell","este":"this","ir":"to go","otro":"other/another","ese":"that","si":"if","me":"me","ya":"already","ver":"to see","porque":"because","dar":"to give","cuando":"when","él":"he","muy":"very","sin":"without","vez":"time","mucho":"much/a lot","saber":"to know","qué":"what","sobre":"about/on","mi":"my","alguno":"some","mismo":"same","yo":"I","también":"also/too","hasta":"until/even","año":"year","dos":"two","querer":"to want","entre":"between","así":"thus/so","primero":"first","desde":"from/since","grande":"big/large","eso":"that","ni":"neither/nor","nos":"us","llegar":"to arrive","pasar":"to pass/happen","tiempo":"time","ella":"she","sí":"yes","día":"day","uno":"one","bien":"well/good","poco":"little/few","deber":"must/should","entonces":"then","poner":"to put","cosa":"thing","tanto":"so much","hombre":"man","parecer":"to seem","nuestro":"our","tan":"so","donde":"where","ahora":"now","parte":"part","después":"after","vida":"life","quedar":"to stay/remain","siempre":"always","creer":"to believe","hablar":"to speak","llevar":"to carry/wear","dejar":"to leave/let","nada":"nothing","cada":"each","seguir":"to follow","menos":"less","nuevo":"new","encontrar":"to find","algo":"something","solo":"only/alone","casa":"house","mundo":"world","país":"country","contra":"against","trabajo":"work","llamar":"to call","agua":"water","mano":"hand","madre":"mother","padre":"father","nombre":"name","libro":"book","ciudad":"city","hora":"hour","calle":"street","mujer":"woman","niño":"child/boy","ojo":"eye","cara":"face","sol":"sun","luna":"moon","mesa":"table","silla":"chair","puerta":"door","ventana":"window","cama":"bed","comida":"food","perro":"dog","gato":"cat","árbol":"tree","flor":"flower","color":"color","blanco":"white","negro":"black","rojo":"red","azul":"blue","verde":"green","amarillo":"yellow","amor":"love","amigo":"friend","familia":"family","hermano":"brother","hermana":"sister","hijo":"son","hija":"daughter","esposo":"husband","esposa":"wife","comer":"to eat","beber":"to drink","dormir":"to sleep","caminar":"to walk","correr":"to run","leer":"to read","escribir":"to write","pensar":"to think","sentir":"to feel","vivir":"to live","morir":"to die","nacer":"to be born","aprender":"to learn","enseñar":"to teach","estudiar":"to study","trabajar":"to work","jugar":"to play","cantar":"to sing","bailar":"to dance","reír":"to laugh","llorar":"to cry","ayudar":"to help","necesitar":"to need","usar":"to use","comprar":"to buy","vender":"to sell","pagar":"to pay","ganar":"to win/earn","perder":"to lose","buscar":"to search/look for","esperar":"to wait/hope","olvidar":"to forget","recordar":"to remember","preguntar":"to ask","responder":"to answer","entender":"to understand","explicar":"to explain","conocer":"to know/meet","mostrar":"to show","abrir":"to open","cerrar":"to close","comenzar":"to begin","terminar":"to finish","continuar":"to continue","cambiar":"to change","recibir":"to receive","enviar":"to send","guardar":"to save/keep","tirar":"to throw","caer":"to fall","subir":"to go up","bajar":"to go down","entrar":"to enter","salir":"to leave/go out","venir":"to come","volver":"to return","traer":"to bring","tomar":"to take","coger":"to catch/take","tocar":"to touch/play","mirar":"to look at","escuchar":"to listen","oír":"to hear","sentarse":"to sit down","levantarse":"to get up","despertarse":"to wake up","acostarse":"to go to bed","vestirse":"to get dressed","lavarse":"to wash oneself","limpio":"clean","sucio":"dirty","pequeño":"small","alto":"tall/high","bajo":"short/low","largo":"long","corto":"short","ancho":"wide","estrecho":"narrow","gordo":"fat","delgado":"thin","fuerte":"strong","débil":"weak","joven":"young","viejo":"old","antiguo":"old/ancient","bueno":"good","malo":"bad","mejor":"better","peor":"worse","fácil":"easy","difícil":"difficult","posible":"possible","imposible":"impossible","importante":"important","necesario":"necessary","seguro":"sure/safe","peligroso":"dangerous","feliz":"happy","triste":"sad","contento":"content/happy","enojado":"angry","cansado":"tired","enfermo":"sick","sano":"healthy","rico":"rich","pobre":"poor","caro":"expensive","barato":"cheap","caliente":"hot","frío":"cold","templado":"warm","húmedo":"humid/wet","seco":"dry","lleno":"full","vacío":"empty","claro":"clear/light","oscuro":"dark","rápido":"fast","lento":"slow","temprano":"early","tarde":"late","cerca":"near","lejos":"far","dentro":"inside","fuera":"outside","arriba":"up/above","abajo":"down/below","delante":"in front","detrás":"behind","izquierda":"left","derecha":"right","aquí":"here","allí":"there","acá":"here","allá":"there","hoy":"today","ayer":"yesterday","mañana":"tomorrow","semana":"week","mes":"month","lunes":"Monday","martes":"Tuesday","miércoles":"Wednesday","jueves":"Thursday","viernes":"Friday","sábado":"Saturday","domingo":"Sunday","enero":"January","febrero":"February","marzo":"March","abril":"April","mayo":"May","junio":"June","julio":"July","agosto":"August","septiembre":"September","octubre":"October","noviembre":"November","diciembre":"December","número":"number","tres":"three","cuatro":"four","cinco":"five","seis":"six","siete":"seven","ocho":"eight","nueve":"nine","diez":"ten","once":"eleven","doce":"twelve","trece":"thirteen","catorce":"fourteen","quince":"fifteen","veinte":"twenty","treinta":"thirty","cuarenta":"forty","cincuenta":"fifty","cien":"hundred","mil":"thousand"};
 
-      // Translate word - tries online first, falls back to offline dictionary
+      // Lazily load (or return the cached) in-browser translation model.
+      // Downloads once, then transformers.js serves it from the browser's
+      // Cache Storage - no network needed on subsequent uses.
+      const ensureTranslator = async () => {
+        if (translatorRef.current) return translatorRef.current;
+
+        setTranslatorStatus('loading');
+        try {
+          const translator = await window.getOfflineTranslator((data) => {
+            // transformers.js emits several event shapes; we only care about
+            // per-file download progress to drive a percentage.
+            if (data.status === 'progress' && typeof data.progress === 'number') {
+              setTranslatorProgress(Math.round(data.progress));
+            }
+          });
+          translatorRef.current = translator;
+          setTranslatorStatus('ready');
+          setTranslatorProgress(100);
+          return translator;
+        } catch (error) {
+          console.error('Failed to load offline translation model:', error);
+          setTranslatorStatus('error');
+          throw error;
+        }
+      };
+
+      // Translate word - uses the in-browser offline model, falling back to
+      // the small embedded dictionary if the model can't load on this device.
       const handleWordClick = async (word, event) => {
         event.stopPropagation();
         
@@ -1042,7 +1117,7 @@
         
         setTranslation({
           word: cleanWord,
-          translation: 'Translating...',
+          translation: translatorRef.current ? 'Translating...' : 'Loading offline translator (first time only)…',
           x: rect.left,
           y: rect.top,
           width: rect.width,
@@ -1051,43 +1126,27 @@
         setSentenceTranslation(null);
 
         try {
-          // Try Google Translate API first (online)
-          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=es&tl=en&dt=t&q=${encodeURIComponent(cleanWord)}`;
-          
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 2000); // 2 second timeout
-          
-          const response = await fetch(url, { 
-            signal: controller.signal,
-            cache: 'no-cache'
-          });
-          clearTimeout(timeoutId);
-          
-          const data = await response.json();
-          const translatedText = data[0][0][0];
+          const translator = await ensureTranslator();
+          const result = await translator(cleanWord);
+          const translatedText = (result && result[0] && result[0].translation_text) || '';
 
-          setTranslation(prev => ({
-            ...prev,
-            translation: translatedText
-          }));
+          setTranslation(prev => (prev && prev.word === cleanWord)
+            ? { ...prev, translation: translatedText || 'No translation found.' }
+            : prev);
         } catch (error) {
-          // Offline or network error - use embedded dictionary
-          console.log('Using offline dictionary');
-          
+          // Model failed to load (e.g. unsupported browser) - fall back to
+          // the small embedded dictionary so word lookups still work.
+          console.log('Offline model unavailable, using embedded dictionary:', error);
+
           const offlineTranslation = offlineDictionary[cleanWord];
-          
-          if (offlineTranslation) {
-            setTranslation(prev => ({
-              ...prev,
-              translation: offlineTranslation + ' (offline)'
-            }));
-          } else {
-            // Word not in dictionary - suggest iOS Look Up
-            setTranslation(prev => ({
-              ...prev,
-              translation: 'Tap and hold the word, then select "Look Up" for more translations'
-            }));
-          }
+
+          setTranslation(prev => {
+            if (!prev || prev.word !== cleanWord) return prev;
+            if (offlineTranslation) {
+              return { ...prev, translation: offlineTranslation + ' (dictionary)' };
+            }
+            return { ...prev, translation: 'Tap and hold the word, then select "Look Up" for more translations' };
+          });
         }
       };
 
@@ -1109,23 +1168,20 @@
         return match ? match.trim() : null;
       };
 
-      // Translate the sentence containing the tapped word
+      // Translate the sentence containing the tapped word, using the same
+      // in-browser offline model as single-word lookups.
       const handleTranslateSentence = async () => {
         const sentence = extractSentenceContaining(translation.word);
         if (!sentence) { setSentenceTranslation('Could not detect sentence.'); return; }
         setSentenceTranslation('loading');
         try {
-          const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=es&tl=en&dt=t&q=${encodeURIComponent(sentence)}`;
-          const controller = new AbortController();
-          const timeoutId = setTimeout(() => controller.abort(), 4000);
-          const response = await fetch(url, { signal: controller.signal, cache: 'no-cache' });
-          clearTimeout(timeoutId);
-          const data = await response.json();
-          // Result can be split across multiple array entries — join them
-          const translated = data[0].map(part => part[0]).join('');
-          setSentenceTranslation(translated);
+          const translator = await ensureTranslator();
+          const result = await translator(sentence);
+          const translated = (result && result[0] && result[0].translation_text) || '';
+          setSentenceTranslation(translated || 'No translation found.');
         } catch (e) {
-          setSentenceTranslation('Could not translate — check your connection.');
+          console.log('Offline model unavailable for sentence translation:', e);
+          setSentenceTranslation('Offline translator unavailable on this device.');
         }
       };
 
@@ -1418,6 +1474,39 @@
                           <option value="large">Large</option>
                           <option value="xlarge">Extra Large</option>
                         </select>
+                      </div>
+
+                      {/* Offline Translator Status */}
+                      <div className="flex items-center justify-center gap-2">
+                        <span className={`text-sm ${darkMode ? 'text-gray-400' : 'text-gray-600'}`}>
+                          Offline translator:
+                        </span>
+                        {translatorStatus === 'ready' && (
+                          <span className={`text-sm font-medium ${darkMode ? 'text-green-400' : 'text-green-600'}`}>
+                            Ready ✓
+                          </span>
+                        )}
+                        {translatorStatus === 'loading' && (
+                          <span className={`text-sm ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}>
+                            Downloading… {translatorProgress}%
+                          </span>
+                        )}
+                        {translatorStatus === 'error' && (
+                          <button
+                            onClick={() => { translatorRef.current = null; ensureTranslator().catch(() => {}); }}
+                            className={`text-sm underline ${darkMode ? 'text-red-400' : 'text-red-600'}`}
+                          >
+                            Failed — tap to retry
+                          </button>
+                        )}
+                        {translatorStatus === 'idle' && (
+                          <button
+                            onClick={() => ensureTranslator().catch(() => {})}
+                            className={`text-sm underline ${darkMode ? 'text-blue-400' : 'text-blue-600'}`}
+                          >
+                            Download now
+                          </button>
+                        )}
                       </div>
                       
                       {/* Jump to Page */}
